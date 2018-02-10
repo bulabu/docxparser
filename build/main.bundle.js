@@ -60,7 +60,7 @@
 /******/ 	__webpack_require__.p = "";
 /******/
 /******/ 	// Load entry module and return exports
-/******/ 	return __webpack_require__(__webpack_require__.s = 6);
+/******/ 	return __webpack_require__(__webpack_require__.s = 28);
 /******/ })
 /************************************************************************/
 /******/ ([
@@ -78,7 +78,7 @@ function _defineProperty(obj, key, value) {
 	}return obj;
 }
 
-var _require = __webpack_require__(8),
+var _require = __webpack_require__(30),
     DOMParser = _require.DOMParser,
     XMLSerializer = _require.XMLSerializer;
 
@@ -622,6 +622,466 @@ module.exports = {
 "use strict";
 
 
+var support = __webpack_require__(5);
+var compressions = __webpack_require__(9);
+var nodeBuffer = __webpack_require__(11);
+/**
+ * Convert a string to a "binary string" : a string containing only char codes between 0 and 255.
+ * @param {string} str the string to transform.
+ * @return {String} the binary string.
+ */
+exports.string2binary = function (str) {
+    var result = "";
+    for (var i = 0; i < str.length; i++) {
+        result += String.fromCharCode(str.charCodeAt(i) & 0xff);
+    }
+    return result;
+};
+exports.arrayBuffer2Blob = function (buffer, mimeType) {
+    exports.checkSupport("blob");
+    mimeType = mimeType || 'application/zip';
+
+    try {
+        // Blob constructor
+        return new Blob([buffer], {
+            type: mimeType
+        });
+    } catch (e) {
+
+        try {
+            // deprecated, browser only, old way
+            var Builder = window.BlobBuilder || window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder;
+            var builder = new Builder();
+            builder.append(buffer);
+            return builder.getBlob(mimeType);
+        } catch (e) {
+
+            // well, fuck ?!
+            throw new Error("Bug : can't construct the Blob.");
+        }
+    }
+};
+/**
+ * The identity function.
+ * @param {Object} input the input.
+ * @return {Object} the same input.
+ */
+function identity(input) {
+    return input;
+}
+
+/**
+ * Fill in an array with a string.
+ * @param {String} str the string to use.
+ * @param {Array|ArrayBuffer|Uint8Array|Buffer} array the array to fill in (will be mutated).
+ * @return {Array|ArrayBuffer|Uint8Array|Buffer} the updated array.
+ */
+function stringToArrayLike(str, array) {
+    for (var i = 0; i < str.length; ++i) {
+        array[i] = str.charCodeAt(i) & 0xFF;
+    }
+    return array;
+}
+
+/**
+ * Transform an array-like object to a string.
+ * @param {Array|ArrayBuffer|Uint8Array|Buffer} array the array to transform.
+ * @return {String} the result.
+ */
+function arrayLikeToString(array) {
+    // Performances notes :
+    // --------------------
+    // String.fromCharCode.apply(null, array) is the fastest, see
+    // see http://jsperf.com/converting-a-uint8array-to-a-string/2
+    // but the stack is limited (and we can get huge arrays !).
+    //
+    // result += String.fromCharCode(array[i]); generate too many strings !
+    //
+    // This code is inspired by http://jsperf.com/arraybuffer-to-string-apply-performance/2
+    var chunk = 65536;
+    var result = [],
+        len = array.length,
+        type = exports.getTypeOf(array),
+        k = 0,
+        canUseApply = true;
+    try {
+        switch (type) {
+            case "uint8array":
+                String.fromCharCode.apply(null, new Uint8Array(0));
+                break;
+            case "nodebuffer":
+                String.fromCharCode.apply(null, nodeBuffer(0));
+                break;
+        }
+    } catch (e) {
+        canUseApply = false;
+    }
+
+    // no apply : slow and painful algorithm
+    // default browser on android 4.*
+    if (!canUseApply) {
+        var resultStr = "";
+        for (var i = 0; i < array.length; i++) {
+            resultStr += String.fromCharCode(array[i]);
+        }
+        return resultStr;
+    }
+    while (k < len && chunk > 1) {
+        try {
+            if (type === "array" || type === "nodebuffer") {
+                result.push(String.fromCharCode.apply(null, array.slice(k, Math.min(k + chunk, len))));
+            } else {
+                result.push(String.fromCharCode.apply(null, array.subarray(k, Math.min(k + chunk, len))));
+            }
+            k += chunk;
+        } catch (e) {
+            chunk = Math.floor(chunk / 2);
+        }
+    }
+    return result.join("");
+}
+
+exports.applyFromCharCode = arrayLikeToString;
+
+/**
+ * Copy the data from an array-like to an other array-like.
+ * @param {Array|ArrayBuffer|Uint8Array|Buffer} arrayFrom the origin array.
+ * @param {Array|ArrayBuffer|Uint8Array|Buffer} arrayTo the destination array which will be mutated.
+ * @return {Array|ArrayBuffer|Uint8Array|Buffer} the updated destination array.
+ */
+function arrayLikeToArrayLike(arrayFrom, arrayTo) {
+    for (var i = 0; i < arrayFrom.length; i++) {
+        arrayTo[i] = arrayFrom[i];
+    }
+    return arrayTo;
+}
+
+// a matrix containing functions to transform everything into everything.
+var transform = {};
+
+// string to ?
+transform["string"] = {
+    "string": identity,
+    "array": function array(input) {
+        return stringToArrayLike(input, new Array(input.length));
+    },
+    "arraybuffer": function arraybuffer(input) {
+        return transform["string"]["uint8array"](input).buffer;
+    },
+    "uint8array": function uint8array(input) {
+        return stringToArrayLike(input, new Uint8Array(input.length));
+    },
+    "nodebuffer": function nodebuffer(input) {
+        return stringToArrayLike(input, nodeBuffer(input.length));
+    }
+};
+
+// array to ?
+transform["array"] = {
+    "string": arrayLikeToString,
+    "array": identity,
+    "arraybuffer": function arraybuffer(input) {
+        return new Uint8Array(input).buffer;
+    },
+    "uint8array": function uint8array(input) {
+        return new Uint8Array(input);
+    },
+    "nodebuffer": function nodebuffer(input) {
+        return nodeBuffer(input);
+    }
+};
+
+// arraybuffer to ?
+transform["arraybuffer"] = {
+    "string": function string(input) {
+        return arrayLikeToString(new Uint8Array(input));
+    },
+    "array": function array(input) {
+        return arrayLikeToArrayLike(new Uint8Array(input), new Array(input.byteLength));
+    },
+    "arraybuffer": identity,
+    "uint8array": function uint8array(input) {
+        return new Uint8Array(input);
+    },
+    "nodebuffer": function nodebuffer(input) {
+        return nodeBuffer(new Uint8Array(input));
+    }
+};
+
+// uint8array to ?
+transform["uint8array"] = {
+    "string": arrayLikeToString,
+    "array": function array(input) {
+        return arrayLikeToArrayLike(input, new Array(input.length));
+    },
+    "arraybuffer": function arraybuffer(input) {
+        return input.buffer;
+    },
+    "uint8array": identity,
+    "nodebuffer": function nodebuffer(input) {
+        return nodeBuffer(input);
+    }
+};
+
+// nodebuffer to ?
+transform["nodebuffer"] = {
+    "string": arrayLikeToString,
+    "array": function array(input) {
+        return arrayLikeToArrayLike(input, new Array(input.length));
+    },
+    "arraybuffer": function arraybuffer(input) {
+        return transform["nodebuffer"]["uint8array"](input).buffer;
+    },
+    "uint8array": function uint8array(input) {
+        return arrayLikeToArrayLike(input, new Uint8Array(input.length));
+    },
+    "nodebuffer": identity
+};
+
+/**
+ * Transform an input into any type.
+ * The supported output type are : string, array, uint8array, arraybuffer, nodebuffer.
+ * If no output type is specified, the unmodified input will be returned.
+ * @param {String} outputType the output type.
+ * @param {String|Array|ArrayBuffer|Uint8Array|Buffer} input the input to convert.
+ * @throws {Error} an Error if the browser doesn't support the requested output type.
+ */
+exports.transformTo = function (outputType, input) {
+    if (!input) {
+        // undefined, null, etc
+        // an empty string won't harm.
+        input = "";
+    }
+    if (!outputType) {
+        return input;
+    }
+    exports.checkSupport(outputType);
+    var inputType = exports.getTypeOf(input);
+    var result = transform[inputType][outputType](input);
+    return result;
+};
+
+/**
+ * Return the type of the input.
+ * The type will be in a format valid for JSZip.utils.transformTo : string, array, uint8array, arraybuffer.
+ * @param {Object} input the input to identify.
+ * @return {String} the (lowercase) type of the input.
+ */
+exports.getTypeOf = function (input) {
+    if (typeof input === "string") {
+        return "string";
+    }
+    if (Object.prototype.toString.call(input) === "[object Array]") {
+        return "array";
+    }
+    if (support.nodebuffer && nodeBuffer.test(input)) {
+        return "nodebuffer";
+    }
+    if (support.uint8array && input instanceof Uint8Array) {
+        return "uint8array";
+    }
+    if (support.arraybuffer && input instanceof ArrayBuffer) {
+        return "arraybuffer";
+    }
+};
+
+/**
+ * Throw an exception if the type is not supported.
+ * @param {String} type the type to check.
+ * @throws {Error} an Error if the browser doesn't support the requested type.
+ */
+exports.checkSupport = function (type) {
+    var supported = support[type.toLowerCase()];
+    if (!supported) {
+        throw new Error(type + " is not supported by this browser");
+    }
+};
+exports.MAX_VALUE_16BITS = 65535;
+exports.MAX_VALUE_32BITS = -1; // well, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF" is parsed as -1
+
+/**
+ * Prettify a string read as binary.
+ * @param {string} str the string to prettify.
+ * @return {string} a pretty string.
+ */
+exports.pretty = function (str) {
+    var res = '',
+        code,
+        i;
+    for (i = 0; i < (str || "").length; i++) {
+        code = str.charCodeAt(i);
+        res += '\\x' + (code < 16 ? "0" : "") + code.toString(16).toUpperCase();
+    }
+    return res;
+};
+
+/**
+ * Find a compression registered in JSZip.
+ * @param {string} compressionMethod the method magic to find.
+ * @return {Object|null} the JSZip compression object, null if none found.
+ */
+exports.findCompression = function (compressionMethod) {
+    for (var method in compressions) {
+        if (!compressions.hasOwnProperty(method)) {
+            continue;
+        }
+        if (compressions[method].magic === compressionMethod) {
+            return compressions[method];
+        }
+    }
+    return null;
+};
+/**
+* Cross-window, cross-Node-context regular expression detection
+* @param  {Object}  object Anything
+* @return {Boolean}        true if the object is a regular expression,
+* false otherwise
+*/
+exports.isRegExp = function (object) {
+    return Object.prototype.toString.call(object) === "[object RegExp]";
+};
+
+/**
+ * Merge the objects passed as parameters into a new one.
+ * @private
+ * @param {...Object} var_args All objects to merge.
+ * @return {Object} a new object with the data of the others.
+ */
+exports.extend = function () {
+    var result = {},
+        i,
+        attr;
+    for (i = 0; i < arguments.length; i++) {
+        // arguments is not enumerable in some browsers
+        for (attr in arguments[i]) {
+            if (arguments[i].hasOwnProperty(attr) && typeof result[attr] === "undefined") {
+                result[attr] = arguments[i][attr];
+            }
+        }
+    }
+    return result;
+};
+
+/***/ }),
+/* 3 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+var TYPED_OK = typeof Uint8Array !== 'undefined' && typeof Uint16Array !== 'undefined' && typeof Int32Array !== 'undefined';
+
+function _has(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+exports.assign = function (obj /*from1, from2, from3, ...*/) {
+  var sources = Array.prototype.slice.call(arguments, 1);
+  while (sources.length) {
+    var source = sources.shift();
+    if (!source) {
+      continue;
+    }
+
+    if ((typeof source === 'undefined' ? 'undefined' : _typeof(source)) !== 'object') {
+      throw new TypeError(source + 'must be non-object');
+    }
+
+    for (var p in source) {
+      if (_has(source, p)) {
+        obj[p] = source[p];
+      }
+    }
+  }
+
+  return obj;
+};
+
+// reduce buffer size, avoiding mem copy
+exports.shrinkBuf = function (buf, size) {
+  if (buf.length === size) {
+    return buf;
+  }
+  if (buf.subarray) {
+    return buf.subarray(0, size);
+  }
+  buf.length = size;
+  return buf;
+};
+
+var fnTyped = {
+  arraySet: function arraySet(dest, src, src_offs, len, dest_offs) {
+    if (src.subarray && dest.subarray) {
+      dest.set(src.subarray(src_offs, src_offs + len), dest_offs);
+      return;
+    }
+    // Fallback to ordinary array
+    for (var i = 0; i < len; i++) {
+      dest[dest_offs + i] = src[src_offs + i];
+    }
+  },
+  // Join array of chunks to single array.
+  flattenChunks: function flattenChunks(chunks) {
+    var i, l, len, pos, chunk, result;
+
+    // calculate data length
+    len = 0;
+    for (i = 0, l = chunks.length; i < l; i++) {
+      len += chunks[i].length;
+    }
+
+    // join chunks
+    result = new Uint8Array(len);
+    pos = 0;
+    for (i = 0, l = chunks.length; i < l; i++) {
+      chunk = chunks[i];
+      result.set(chunk, pos);
+      pos += chunk.length;
+    }
+
+    return result;
+  }
+};
+
+var fnUntyped = {
+  arraySet: function arraySet(dest, src, src_offs, len, dest_offs) {
+    for (var i = 0; i < len; i++) {
+      dest[dest_offs + i] = src[src_offs + i];
+    }
+  },
+  // Join array of chunks to single array.
+  flattenChunks: function flattenChunks(chunks) {
+    return [].concat.apply([], chunks);
+  }
+};
+
+// Enable/Disable typed arrays use, for testing
+//
+exports.setTyped = function (on) {
+  if (on) {
+    exports.Buf8 = Uint8Array;
+    exports.Buf16 = Uint16Array;
+    exports.Buf32 = Int32Array;
+    exports.assign(exports, fnTyped);
+  } else {
+    exports.Buf8 = Array;
+    exports.Buf16 = Array;
+    exports.Buf32 = Array;
+    exports.assign(exports, fnUntyped);
+  }
+};
+
+exports.setTyped(TYPED_OK);
+
+/***/ }),
+/* 4 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
 function emptyFun() {}
 function identity(i) {
 	return i;
@@ -650,7 +1110,46 @@ module.exports = function (module) {
 };
 
 /***/ }),
-/* 3 */
+/* 5 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+/* WEBPACK VAR INJECTION */(function(Buffer) {
+
+exports.base64 = true;
+exports.array = true;
+exports.string = true;
+exports.arraybuffer = typeof ArrayBuffer !== "undefined" && typeof Uint8Array !== "undefined";
+// contains true if JSZip can read/generate nodejs Buffer, false otherwise.
+// Browserify will provide a Buffer implementation for browsers, which is
+// an augmented Uint8Array (i.e., can be used as either Buffer or U8).
+exports.nodebuffer = typeof Buffer !== "undefined";
+// contains true if JSZip can read/generate Uint8Array, false otherwise.
+exports.uint8array = typeof Uint8Array !== "undefined";
+
+if (typeof ArrayBuffer === "undefined") {
+    exports.blob = false;
+} else {
+    var buffer = new ArrayBuffer(0);
+    try {
+        exports.blob = new Blob([buffer], {
+            type: "application/zip"
+        }).size === 0;
+    } catch (e) {
+        try {
+            var Builder = window.BlobBuilder || window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder;
+            var builder = new Builder();
+            builder.append(buffer);
+            exports.blob = builder.getBlob('application/zip').size === 0;
+        } catch (e) {
+            exports.blob = false;
+        }
+    }
+}
+/* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(14).Buffer))
+
+/***/ }),
+/* 6 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -878,7 +1377,1016 @@ module.exports = {
 };
 
 /***/ }),
-/* 4 */
+/* 7 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+// private property
+
+var _keyStr = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+
+// public method for encoding
+exports.encode = function (input, utf8) {
+    var output = "";
+    var chr1, chr2, chr3, enc1, enc2, enc3, enc4;
+    var i = 0;
+
+    while (i < input.length) {
+
+        chr1 = input.charCodeAt(i++);
+        chr2 = input.charCodeAt(i++);
+        chr3 = input.charCodeAt(i++);
+
+        enc1 = chr1 >> 2;
+        enc2 = (chr1 & 3) << 4 | chr2 >> 4;
+        enc3 = (chr2 & 15) << 2 | chr3 >> 6;
+        enc4 = chr3 & 63;
+
+        if (isNaN(chr2)) {
+            enc3 = enc4 = 64;
+        } else if (isNaN(chr3)) {
+            enc4 = 64;
+        }
+
+        output = output + _keyStr.charAt(enc1) + _keyStr.charAt(enc2) + _keyStr.charAt(enc3) + _keyStr.charAt(enc4);
+    }
+
+    return output;
+};
+
+// public method for decoding
+exports.decode = function (input, utf8) {
+    var output = "";
+    var chr1, chr2, chr3;
+    var enc1, enc2, enc3, enc4;
+    var i = 0;
+
+    input = input.replace(/[^A-Za-z0-9\+\/\=]/g, "");
+
+    while (i < input.length) {
+
+        enc1 = _keyStr.indexOf(input.charAt(i++));
+        enc2 = _keyStr.indexOf(input.charAt(i++));
+        enc3 = _keyStr.indexOf(input.charAt(i++));
+        enc4 = _keyStr.indexOf(input.charAt(i++));
+
+        chr1 = enc1 << 2 | enc2 >> 4;
+        chr2 = (enc2 & 15) << 4 | enc3 >> 2;
+        chr3 = (enc3 & 3) << 6 | enc4;
+
+        output = output + String.fromCharCode(chr1);
+
+        if (enc3 != 64) {
+            output = output + String.fromCharCode(chr2);
+        }
+        if (enc4 != 64) {
+            output = output + String.fromCharCode(chr3);
+        }
+    }
+
+    return output;
+};
+
+/***/ }),
+/* 8 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var support = __webpack_require__(5);
+var utils = __webpack_require__(2);
+var _crc = __webpack_require__(59);
+var signature = __webpack_require__(20);
+var defaults = __webpack_require__(21);
+var base64 = __webpack_require__(7);
+var compressions = __webpack_require__(9);
+var CompressedObject = __webpack_require__(22);
+var nodeBuffer = __webpack_require__(11);
+var utf8 = __webpack_require__(23);
+var StringWriter = __webpack_require__(60);
+var Uint8ArrayWriter = __webpack_require__(61);
+
+/**
+ * Returns the raw data of a ZipObject, decompress the content if necessary.
+ * @param {ZipObject} file the file to use.
+ * @return {String|ArrayBuffer|Uint8Array|Buffer} the data.
+ */
+var getRawData = function getRawData(file) {
+    if (file._data instanceof CompressedObject) {
+        file._data = file._data.getContent();
+        file.options.binary = true;
+        file.options.base64 = false;
+
+        if (utils.getTypeOf(file._data) === "uint8array") {
+            var copy = file._data;
+            // when reading an arraybuffer, the CompressedObject mechanism will keep it and subarray() a Uint8Array.
+            // if we request a file in the same format, we might get the same Uint8Array or its ArrayBuffer (the original zip file).
+            file._data = new Uint8Array(copy.length);
+            // with an empty Uint8Array, Opera fails with a "Offset larger than array size"
+            if (copy.length !== 0) {
+                file._data.set(copy, 0);
+            }
+        }
+    }
+    return file._data;
+};
+
+/**
+ * Returns the data of a ZipObject in a binary form. If the content is an unicode string, encode it.
+ * @param {ZipObject} file the file to use.
+ * @return {String|ArrayBuffer|Uint8Array|Buffer} the data.
+ */
+var getBinaryData = function getBinaryData(file) {
+    var result = getRawData(file),
+        type = utils.getTypeOf(result);
+    if (type === "string") {
+        if (!file.options.binary) {
+            // unicode text !
+            // unicode string => binary string is a painful process, check if we can avoid it.
+            if (support.nodebuffer) {
+                return nodeBuffer(result, "utf-8");
+            }
+        }
+        return file.asBinary();
+    }
+    return result;
+};
+
+/**
+ * Transform this._data into a string.
+ * @param {function} filter a function String -> String, applied if not null on the result.
+ * @return {String} the string representing this._data.
+ */
+var dataToString = function dataToString(asUTF8) {
+    var result = getRawData(this);
+    if (result === null || typeof result === "undefined") {
+        return "";
+    }
+    // if the data is a base64 string, we decode it before checking the encoding !
+    if (this.options.base64) {
+        result = base64.decode(result);
+    }
+    if (asUTF8 && this.options.binary) {
+        // JSZip.prototype.utf8decode supports arrays as input
+        // skip to array => string step, utf8decode will do it.
+        result = out.utf8decode(result);
+    } else {
+        // no utf8 transformation, do the array => string step.
+        result = utils.transformTo("string", result);
+    }
+
+    if (!asUTF8 && !this.options.binary) {
+        result = utils.transformTo("string", out.utf8encode(result));
+    }
+    return result;
+};
+/**
+ * A simple object representing a file in the zip file.
+ * @constructor
+ * @param {string} name the name of the file
+ * @param {String|ArrayBuffer|Uint8Array|Buffer} data the data
+ * @param {Object} options the options of the file
+ */
+var ZipObject = function ZipObject(name, data, options) {
+    this.name = name;
+    this.dir = options.dir;
+    this.date = options.date;
+    this.comment = options.comment;
+    this.unixPermissions = options.unixPermissions;
+    this.dosPermissions = options.dosPermissions;
+
+    this._data = data;
+    this.options = options;
+
+    /*
+     * This object contains initial values for dir and date.
+     * With them, we can check if the user changed the deprecated metadata in
+     * `ZipObject#options` or not.
+     */
+    this._initialMetadata = {
+        dir: options.dir,
+        date: options.date
+    };
+};
+
+ZipObject.prototype = {
+    /**
+     * Return the content as UTF8 string.
+     * @return {string} the UTF8 string.
+     */
+    asText: function asText() {
+        return dataToString.call(this, true);
+    },
+    /**
+     * Returns the binary content.
+     * @return {string} the content as binary.
+     */
+    asBinary: function asBinary() {
+        return dataToString.call(this, false);
+    },
+    /**
+     * Returns the content as a nodejs Buffer.
+     * @return {Buffer} the content as a Buffer.
+     */
+    asNodeBuffer: function asNodeBuffer() {
+        var result = getBinaryData(this);
+        return utils.transformTo("nodebuffer", result);
+    },
+    /**
+     * Returns the content as an Uint8Array.
+     * @return {Uint8Array} the content as an Uint8Array.
+     */
+    asUint8Array: function asUint8Array() {
+        var result = getBinaryData(this);
+        return utils.transformTo("uint8array", result);
+    },
+    /**
+     * Returns the content as an ArrayBuffer.
+     * @return {ArrayBuffer} the content as an ArrayBufer.
+     */
+    asArrayBuffer: function asArrayBuffer() {
+        return this.asUint8Array().buffer;
+    }
+};
+
+/**
+ * Transform an integer into a string in hexadecimal.
+ * @private
+ * @param {number} dec the number to convert.
+ * @param {number} bytes the number of bytes to generate.
+ * @returns {string} the result.
+ */
+var decToHex = function decToHex(dec, bytes) {
+    var hex = "",
+        i;
+    for (i = 0; i < bytes; i++) {
+        hex += String.fromCharCode(dec & 0xff);
+        dec = dec >>> 8;
+    }
+    return hex;
+};
+
+/**
+ * Transforms the (incomplete) options from the user into the complete
+ * set of options to create a file.
+ * @private
+ * @param {Object} o the options from the user.
+ * @return {Object} the complete set of options.
+ */
+var prepareFileAttrs = function prepareFileAttrs(o) {
+    o = o || {};
+    if (o.base64 === true && (o.binary === null || o.binary === undefined)) {
+        o.binary = true;
+    }
+    o = utils.extend(o, defaults);
+    o.date = o.date || new Date();
+    if (o.compression !== null) o.compression = o.compression.toUpperCase();
+
+    return o;
+};
+
+/**
+ * Add a file in the current folder.
+ * @private
+ * @param {string} name the name of the file
+ * @param {String|ArrayBuffer|Uint8Array|Buffer} data the data of the file
+ * @param {Object} o the options of the file
+ * @return {Object} the new file.
+ */
+var fileAdd = function fileAdd(name, data, o) {
+    // be sure sub folders exist
+    var dataType = utils.getTypeOf(data),
+        parent;
+
+    o = prepareFileAttrs(o);
+
+    if (typeof o.unixPermissions === "string") {
+        o.unixPermissions = parseInt(o.unixPermissions, 8);
+    }
+
+    // UNX_IFDIR  0040000 see zipinfo.c
+    if (o.unixPermissions && o.unixPermissions & 0x4000) {
+        o.dir = true;
+    }
+    // Bit 4    Directory
+    if (o.dosPermissions && o.dosPermissions & 0x0010) {
+        o.dir = true;
+    }
+
+    if (o.dir) {
+        name = forceTrailingSlash(name);
+    }
+
+    if (o.createFolders && (parent = parentFolder(name))) {
+        folderAdd.call(this, parent, true);
+    }
+
+    if (o.dir || data === null || typeof data === "undefined") {
+        o.base64 = false;
+        o.binary = false;
+        data = null;
+        dataType = null;
+    } else if (dataType === "string") {
+        if (o.binary && !o.base64) {
+            // optimizedBinaryString == true means that the file has already been filtered with a 0xFF mask
+            if (o.optimizedBinaryString !== true) {
+                // this is a string, not in a base64 format.
+                // Be sure that this is a correct "binary string"
+                data = utils.string2binary(data);
+            }
+        }
+    } else {
+        // arraybuffer, uint8array, ...
+        o.base64 = false;
+        o.binary = true;
+
+        if (!dataType && !(data instanceof CompressedObject)) {
+            throw new Error("The data of '" + name + "' is in an unsupported format !");
+        }
+
+        // special case : it's way easier to work with Uint8Array than with ArrayBuffer
+        if (dataType === "arraybuffer") {
+            data = utils.transformTo("uint8array", data);
+        }
+    }
+
+    var object = new ZipObject(name, data, o);
+    this.files[name] = object;
+    return object;
+};
+
+/**
+ * Find the parent folder of the path.
+ * @private
+ * @param {string} path the path to use
+ * @return {string} the parent folder, or ""
+ */
+var parentFolder = function parentFolder(path) {
+    if (path.slice(-1) == '/') {
+        path = path.substring(0, path.length - 1);
+    }
+    var lastSlash = path.lastIndexOf('/');
+    return lastSlash > 0 ? path.substring(0, lastSlash) : "";
+};
+
+/**
+ * Returns the path with a slash at the end.
+ * @private
+ * @param {String} path the path to check.
+ * @return {String} the path with a trailing slash.
+ */
+var forceTrailingSlash = function forceTrailingSlash(path) {
+    // Check the name ends with a /
+    if (path.slice(-1) != "/") {
+        path += "/"; // IE doesn't like substr(-1)
+    }
+    return path;
+};
+/**
+ * Add a (sub) folder in the current folder.
+ * @private
+ * @param {string} name the folder's name
+ * @param {boolean=} [createFolders] If true, automatically create sub
+ *  folders. Defaults to false.
+ * @return {Object} the new folder.
+ */
+var folderAdd = function folderAdd(name, createFolders) {
+    createFolders = typeof createFolders !== 'undefined' ? createFolders : false;
+
+    name = forceTrailingSlash(name);
+
+    // Does this folder already exist?
+    if (!this.files[name]) {
+        fileAdd.call(this, name, null, {
+            dir: true,
+            createFolders: createFolders
+        });
+    }
+    return this.files[name];
+};
+
+/**
+ * Generate a JSZip.CompressedObject for a given zipOject.
+ * @param {ZipObject} file the object to read.
+ * @param {JSZip.compression} compression the compression to use.
+ * @param {Object} compressionOptions the options to use when compressing.
+ * @return {JSZip.CompressedObject} the compressed result.
+ */
+var generateCompressedObjectFrom = function generateCompressedObjectFrom(file, compression, compressionOptions) {
+    var result = new CompressedObject(),
+        content;
+
+    // the data has not been decompressed, we might reuse things !
+    if (file._data instanceof CompressedObject) {
+        result.uncompressedSize = file._data.uncompressedSize;
+        result.crc32 = file._data.crc32;
+
+        if (result.uncompressedSize === 0 || file.dir) {
+            compression = compressions['STORE'];
+            result.compressedContent = "";
+            result.crc32 = 0;
+        } else if (file._data.compressionMethod === compression.magic) {
+            result.compressedContent = file._data.getCompressedContent();
+        } else {
+            content = file._data.getContent();
+            // need to decompress / recompress
+            result.compressedContent = compression.compress(utils.transformTo(compression.compressInputType, content), compressionOptions);
+        }
+    } else {
+        // have uncompressed data
+        content = getBinaryData(file);
+        if (!content || content.length === 0 || file.dir) {
+            compression = compressions['STORE'];
+            content = "";
+        }
+        result.uncompressedSize = content.length;
+        result.crc32 = _crc(content);
+        result.compressedContent = compression.compress(utils.transformTo(compression.compressInputType, content), compressionOptions);
+    }
+
+    result.compressedSize = result.compressedContent.length;
+    result.compressionMethod = compression.magic;
+
+    return result;
+};
+
+/**
+ * Generate the UNIX part of the external file attributes.
+ * @param {Object} unixPermissions the unix permissions or null.
+ * @param {Boolean} isDir true if the entry is a directory, false otherwise.
+ * @return {Number} a 32 bit integer.
+ *
+ * adapted from http://unix.stackexchange.com/questions/14705/the-zip-formats-external-file-attribute :
+ *
+ * TTTTsstrwxrwxrwx0000000000ADVSHR
+ * ^^^^____________________________ file type, see zipinfo.c (UNX_*)
+ *     ^^^_________________________ setuid, setgid, sticky
+ *        ^^^^^^^^^________________ permissions
+ *                 ^^^^^^^^^^______ not used ?
+ *                           ^^^^^^ DOS attribute bits : Archive, Directory, Volume label, System file, Hidden, Read only
+ */
+var generateUnixExternalFileAttr = function generateUnixExternalFileAttr(unixPermissions, isDir) {
+
+    var result = unixPermissions;
+    if (!unixPermissions) {
+        // I can't use octal values in strict mode, hence the hexa.
+        //  040775 => 0x41fd
+        // 0100664 => 0x81b4
+        result = isDir ? 0x41fd : 0x81b4;
+    }
+
+    return (result & 0xFFFF) << 16;
+};
+
+/**
+ * Generate the DOS part of the external file attributes.
+ * @param {Object} dosPermissions the dos permissions or null.
+ * @param {Boolean} isDir true if the entry is a directory, false otherwise.
+ * @return {Number} a 32 bit integer.
+ *
+ * Bit 0     Read-Only
+ * Bit 1     Hidden
+ * Bit 2     System
+ * Bit 3     Volume Label
+ * Bit 4     Directory
+ * Bit 5     Archive
+ */
+var generateDosExternalFileAttr = function generateDosExternalFileAttr(dosPermissions, isDir) {
+
+    // the dir flag is already set for compatibility
+
+    return (dosPermissions || 0) & 0x3F;
+};
+
+/**
+ * Generate the various parts used in the construction of the final zip file.
+ * @param {string} name the file name.
+ * @param {ZipObject} file the file content.
+ * @param {JSZip.CompressedObject} compressedObject the compressed object.
+ * @param {number} offset the current offset from the start of the zip file.
+ * @param {String} platform let's pretend we are this platform (change platform dependents fields)
+ * @param {Function} encodeFileName the function to encode the file name / comment.
+ * @return {object} the zip parts.
+ */
+var generateZipParts = function generateZipParts(name, file, compressedObject, offset, platform, encodeFileName) {
+    var data = compressedObject.compressedContent,
+        useCustomEncoding = encodeFileName !== utf8.utf8encode,
+        encodedFileName = utils.transformTo("string", encodeFileName(file.name)),
+        utfEncodedFileName = utils.transformTo("string", utf8.utf8encode(file.name)),
+        comment = file.comment || "",
+        encodedComment = utils.transformTo("string", encodeFileName(comment)),
+        utfEncodedComment = utils.transformTo("string", utf8.utf8encode(comment)),
+        useUTF8ForFileName = utfEncodedFileName.length !== file.name.length,
+        useUTF8ForComment = utfEncodedComment.length !== comment.length,
+        o = file.options,
+        dosTime,
+        dosDate,
+        extraFields = "",
+        unicodePathExtraField = "",
+        unicodeCommentExtraField = "",
+        dir,
+        date;
+
+    // handle the deprecated options.dir
+    if (file._initialMetadata.dir !== file.dir) {
+        dir = file.dir;
+    } else {
+        dir = o.dir;
+    }
+
+    // handle the deprecated options.date
+    if (file._initialMetadata.date !== file.date) {
+        date = file.date;
+    } else {
+        date = o.date;
+    }
+
+    var extFileAttr = 0;
+    var versionMadeBy = 0;
+    if (dir) {
+        // dos or unix, we set the dos dir flag
+        extFileAttr |= 0x00010;
+    }
+    if (platform === "UNIX") {
+        versionMadeBy = 0x031E; // UNIX, version 3.0
+        extFileAttr |= generateUnixExternalFileAttr(file.unixPermissions, dir);
+    } else {
+        // DOS or other, fallback to DOS
+        versionMadeBy = 0x0014; // DOS, version 2.0
+        extFileAttr |= generateDosExternalFileAttr(file.dosPermissions, dir);
+    }
+
+    // date
+    // @see http://www.delorie.com/djgpp/doc/rbinter/it/52/13.html
+    // @see http://www.delorie.com/djgpp/doc/rbinter/it/65/16.html
+    // @see http://www.delorie.com/djgpp/doc/rbinter/it/66/16.html
+
+    dosTime = date.getHours();
+    dosTime = dosTime << 6;
+    dosTime = dosTime | date.getMinutes();
+    dosTime = dosTime << 5;
+    dosTime = dosTime | date.getSeconds() / 2;
+
+    dosDate = date.getFullYear() - 1980;
+    dosDate = dosDate << 4;
+    dosDate = dosDate | date.getMonth() + 1;
+    dosDate = dosDate << 5;
+    dosDate = dosDate | date.getDate();
+
+    if (useUTF8ForFileName) {
+        // set the unicode path extra field. unzip needs at least one extra
+        // field to correctly handle unicode path, so using the path is as good
+        // as any other information. This could improve the situation with
+        // other archive managers too.
+        // This field is usually used without the utf8 flag, with a non
+        // unicode path in the header (winrar, winzip). This helps (a bit)
+        // with the messy Windows' default compressed folders feature but
+        // breaks on p7zip which doesn't seek the unicode path extra field.
+        // So for now, UTF-8 everywhere !
+        unicodePathExtraField =
+        // Version
+        decToHex(1, 1) +
+        // NameCRC32
+        decToHex(_crc(encodedFileName), 4) +
+        // UnicodeName
+        utfEncodedFileName;
+
+        extraFields +=
+        // Info-ZIP Unicode Path Extra Field
+        "\x75\x70" +
+        // size
+        decToHex(unicodePathExtraField.length, 2) +
+        // content
+        unicodePathExtraField;
+    }
+
+    if (useUTF8ForComment) {
+
+        unicodeCommentExtraField =
+        // Version
+        decToHex(1, 1) +
+        // CommentCRC32
+        decToHex(this.crc32(encodedComment), 4) +
+        // UnicodeName
+        utfEncodedComment;
+
+        extraFields +=
+        // Info-ZIP Unicode Path Extra Field
+        "\x75\x63" +
+        // size
+        decToHex(unicodeCommentExtraField.length, 2) +
+        // content
+        unicodeCommentExtraField;
+    }
+
+    var header = "";
+
+    // version needed to extract
+    header += "\x0A\x00";
+    // general purpose bit flag
+    // set bit 11 if utf8
+    header += !useCustomEncoding && (useUTF8ForFileName || useUTF8ForComment) ? "\x00\x08" : "\x00\x00";
+    // compression method
+    header += compressedObject.compressionMethod;
+    // last mod file time
+    header += decToHex(dosTime, 2);
+    // last mod file date
+    header += decToHex(dosDate, 2);
+    // crc-32
+    header += decToHex(compressedObject.crc32, 4);
+    // compressed size
+    header += decToHex(compressedObject.compressedSize, 4);
+    // uncompressed size
+    header += decToHex(compressedObject.uncompressedSize, 4);
+    // file name length
+    header += decToHex(encodedFileName.length, 2);
+    // extra field length
+    header += decToHex(extraFields.length, 2);
+
+    var fileRecord = signature.LOCAL_FILE_HEADER + header + encodedFileName + extraFields;
+
+    var dirRecord = signature.CENTRAL_FILE_HEADER +
+    // version made by (00: DOS)
+    decToHex(versionMadeBy, 2) +
+    // file header (common to file and central directory)
+    header +
+    // file comment length
+    decToHex(encodedComment.length, 2) +
+    // disk number start
+    "\x00\x00" +
+    // internal file attributes TODO
+    "\x00\x00" +
+    // external file attributes
+    decToHex(extFileAttr, 4) +
+    // relative offset of local header
+    decToHex(offset, 4) +
+    // file name
+    encodedFileName +
+    // extra field
+    extraFields +
+    // file comment
+    encodedComment;
+
+    return {
+        fileRecord: fileRecord,
+        dirRecord: dirRecord,
+        compressedObject: compressedObject
+    };
+};
+
+// return the actual prototype of JSZip
+var out = {
+    /**
+     * Read an existing zip and merge the data in the current JSZip object.
+     * The implementation is in jszip-load.js, don't forget to include it.
+     * @param {String|ArrayBuffer|Uint8Array|Buffer} stream  The stream to load
+     * @param {Object} options Options for loading the stream.
+     *  options.base64 : is the stream in base64 ? default : false
+     * @return {JSZip} the current JSZip object
+     */
+    load: function load(stream, options) {
+        throw new Error("Load method is not defined. Is the file jszip-load.js included ?");
+    },
+
+    /**
+     * Filter nested files/folders with the specified function.
+     * @param {Function} search the predicate to use :
+     * function (relativePath, file) {...}
+     * It takes 2 arguments : the relative path and the file.
+     * @return {Array} An array of matching elements.
+     */
+    filter: function filter(search) {
+        var result = [],
+            filename,
+            relativePath,
+            file,
+            fileClone;
+        for (filename in this.files) {
+            if (!this.files.hasOwnProperty(filename)) {
+                continue;
+            }
+            file = this.files[filename];
+            // return a new object, don't let the user mess with our internal objects :)
+            fileClone = new ZipObject(file.name, file._data, utils.extend(file.options));
+            relativePath = filename.slice(this.root.length, filename.length);
+            if (filename.slice(0, this.root.length) === this.root && // the file is in the current root
+            search(relativePath, fileClone)) {
+                // and the file matches the function
+                result.push(fileClone);
+            }
+        }
+        return result;
+    },
+
+    /**
+     * Add a file to the zip file, or search a file.
+     * @param   {string|RegExp} name The name of the file to add (if data is defined),
+     * the name of the file to find (if no data) or a regex to match files.
+     * @param   {String|ArrayBuffer|Uint8Array|Buffer} data  The file data, either raw or base64 encoded
+     * @param   {Object} o     File options
+     * @return  {JSZip|Object|Array} this JSZip object (when adding a file),
+     * a file (when searching by string) or an array of files (when searching by regex).
+     */
+    file: function file(name, data, o) {
+        if (arguments.length === 1) {
+            if (utils.isRegExp(name)) {
+                var regexp = name;
+                return this.filter(function (relativePath, file) {
+                    return !file.dir && regexp.test(relativePath);
+                });
+            } else {
+                // text
+                return this.filter(function (relativePath, file) {
+                    return !file.dir && relativePath === name;
+                })[0] || null;
+            }
+        } else {
+            // more than one argument : we have data !
+            name = this.root + name;
+            fileAdd.call(this, name, data, o);
+        }
+        return this;
+    },
+
+    /**
+     * Add a directory to the zip file, or search.
+     * @param   {String|RegExp} arg The name of the directory to add, or a regex to search folders.
+     * @return  {JSZip} an object with the new directory as the root, or an array containing matching folders.
+     */
+    folder: function folder(arg) {
+        if (!arg) {
+            return this;
+        }
+
+        if (utils.isRegExp(arg)) {
+            return this.filter(function (relativePath, file) {
+                return file.dir && arg.test(relativePath);
+            });
+        }
+
+        // else, name is a new folder
+        var name = this.root + arg;
+        var newFolder = folderAdd.call(this, name);
+
+        // Allow chaining by returning a new object with this folder as the root
+        var ret = this.clone();
+        ret.root = newFolder.name;
+        return ret;
+    },
+
+    /**
+     * Delete a file, or a directory and all sub-files, from the zip
+     * @param {string} name the name of the file to delete
+     * @return {JSZip} this JSZip object
+     */
+    remove: function remove(name) {
+        name = this.root + name;
+        var file = this.files[name];
+        if (!file) {
+            // Look for any folders
+            if (name.slice(-1) != "/") {
+                name += "/";
+            }
+            file = this.files[name];
+        }
+
+        if (file && !file.dir) {
+            // file
+            delete this.files[name];
+        } else {
+            // maybe a folder, delete recursively
+            var kids = this.filter(function (relativePath, file) {
+                return file.name.slice(0, name.length) === name;
+            });
+            for (var i = 0; i < kids.length; i++) {
+                delete this.files[kids[i].name];
+            }
+        }
+
+        return this;
+    },
+
+    /**
+     * Generate the complete zip file
+     * @param {Object} options the options to generate the zip file :
+     * - base64, (deprecated, use type instead) true to generate base64.
+     * - compression, "STORE" by default.
+     * - type, "base64" by default. Values are : string, base64, uint8array, arraybuffer, blob.
+     * @return {String|Uint8Array|ArrayBuffer|Buffer|Blob} the zip file
+     */
+    generate: function generate(options) {
+        options = utils.extend(options || {}, {
+            base64: true,
+            compression: "STORE",
+            compressionOptions: null,
+            type: "base64",
+            platform: "DOS",
+            comment: null,
+            mimeType: 'application/zip',
+            encodeFileName: utf8.utf8encode
+        });
+
+        utils.checkSupport(options.type);
+
+        // accept nodejs `process.platform`
+        if (options.platform === 'darwin' || options.platform === 'freebsd' || options.platform === 'linux' || options.platform === 'sunos') {
+            options.platform = "UNIX";
+        }
+        if (options.platform === 'win32') {
+            options.platform = "DOS";
+        }
+
+        var zipData = [],
+            localDirLength = 0,
+            centralDirLength = 0,
+            writer,
+            i,
+            encodedComment = utils.transformTo("string", options.encodeFileName(options.comment || this.comment || ""));
+
+        // first, generate all the zip parts.
+        for (var name in this.files) {
+            if (!this.files.hasOwnProperty(name)) {
+                continue;
+            }
+            var file = this.files[name];
+
+            var compressionName = file.options.compression || options.compression.toUpperCase();
+            var compression = compressions[compressionName];
+            if (!compression) {
+                throw new Error(compressionName + " is not a valid compression method !");
+            }
+            var compressionOptions = file.options.compressionOptions || options.compressionOptions || {};
+
+            var compressedObject = generateCompressedObjectFrom.call(this, file, compression, compressionOptions);
+
+            var zipPart = generateZipParts.call(this, name, file, compressedObject, localDirLength, options.platform, options.encodeFileName);
+            localDirLength += zipPart.fileRecord.length + compressedObject.compressedSize;
+            centralDirLength += zipPart.dirRecord.length;
+            zipData.push(zipPart);
+        }
+
+        var dirEnd = "";
+
+        // end of central dir signature
+        dirEnd = signature.CENTRAL_DIRECTORY_END +
+        // number of this disk
+        "\x00\x00" +
+        // number of the disk with the start of the central directory
+        "\x00\x00" +
+        // total number of entries in the central directory on this disk
+        decToHex(zipData.length, 2) +
+        // total number of entries in the central directory
+        decToHex(zipData.length, 2) +
+        // size of the central directory   4 bytes
+        decToHex(centralDirLength, 4) +
+        // offset of start of central directory with respect to the starting disk number
+        decToHex(localDirLength, 4) +
+        // .ZIP file comment length
+        decToHex(encodedComment.length, 2) +
+        // .ZIP file comment
+        encodedComment;
+
+        // we have all the parts (and the total length)
+        // time to create a writer !
+        var typeName = options.type.toLowerCase();
+        if (typeName === "uint8array" || typeName === "arraybuffer" || typeName === "blob" || typeName === "nodebuffer") {
+            writer = new Uint8ArrayWriter(localDirLength + centralDirLength + dirEnd.length);
+        } else {
+            writer = new StringWriter(localDirLength + centralDirLength + dirEnd.length);
+        }
+
+        for (i = 0; i < zipData.length; i++) {
+            writer.append(zipData[i].fileRecord);
+            writer.append(zipData[i].compressedObject.compressedContent);
+        }
+        for (i = 0; i < zipData.length; i++) {
+            writer.append(zipData[i].dirRecord);
+        }
+
+        writer.append(dirEnd);
+
+        var zip = writer.finalize();
+
+        switch (options.type.toLowerCase()) {
+            // case "zip is an Uint8Array"
+            case "uint8array":
+            case "arraybuffer":
+            case "nodebuffer":
+                return utils.transformTo(options.type.toLowerCase(), zip);
+            case "blob":
+                return utils.arrayBuffer2Blob(utils.transformTo("arraybuffer", zip), options.mimeType);
+            // case "zip is a string"
+            case "base64":
+                return options.base64 ? base64.encode(zip) : zip;
+            default:
+                // case "string" :
+                return zip;
+        }
+    },
+
+    /**
+     * @deprecated
+     * This method will be removed in a future version without replacement.
+     */
+    crc32: function crc32(input, crc) {
+        return _crc(input, crc);
+    },
+
+    /**
+     * @deprecated
+     * This method will be removed in a future version without replacement.
+     */
+    utf8encode: function utf8encode(string) {
+        return utils.transformTo("string", utf8.utf8encode(string));
+    },
+
+    /**
+     * @deprecated
+     * This method will be removed in a future version without replacement.
+     */
+    utf8decode: function utf8decode(input) {
+        return utf8.utf8decode(input);
+    }
+};
+module.exports = out;
+
+/***/ }),
+/* 9 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+exports.STORE = {
+    magic: "\x00\x00",
+    compress: function compress(content, compressionOptions) {
+        return content; // no compression
+    },
+    uncompress: function uncompress(content) {
+        return content; // no compression
+    },
+    compressInputType: null,
+    uncompressInputType: null
+};
+exports.DEFLATE = __webpack_require__(49);
+
+/***/ }),
+/* 10 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+// (C) 1995-2013 Jean-loup Gailly and Mark Adler
+// (C) 2014-2017 Vitaly Puzrin and Andrey Tupitsin
+//
+// This software is provided 'as-is', without any express or implied
+// warranty. In no event will the authors be held liable for any damages
+// arising from the use of this software.
+//
+// Permission is granted to anyone to use this software for any purpose,
+// including commercial applications, and to alter it and redistribute it
+// freely, subject to the following restrictions:
+//
+// 1. The origin of this software must not be misrepresented; you must not
+//   claim that you wrote the original software. If you use this software
+//   in a product, an acknowledgment in the product documentation would be
+//   appreciated but is not required.
+// 2. Altered source versions must be plainly marked as such, and must not be
+//   misrepresented as being the original software.
+// 3. This notice may not be removed or altered from any source distribution.
+
+module.exports = {
+  2: 'need dictionary', /* Z_NEED_DICT       2  */
+  1: 'stream end', /* Z_STREAM_END      1  */
+  0: '', /* Z_OK              0  */
+  '-1': 'file error', /* Z_ERRNO         (-1) */
+  '-2': 'stream error', /* Z_STREAM_ERROR  (-2) */
+  '-3': 'data error', /* Z_DATA_ERROR    (-3) */
+  '-4': 'insufficient memory', /* Z_MEM_ERROR     (-4) */
+  '-5': 'buffer error', /* Z_BUF_ERROR     (-5) */
+  '-6': 'incompatible version' /* Z_VERSION_ERROR (-6) */
+};
+
+/***/ }),
+/* 11 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+/* WEBPACK VAR INJECTION */(function(Buffer) {
+
+module.exports = function (data, encoding) {
+    return new Buffer(data, encoding);
+};
+module.exports.test = function (b) {
+    return Buffer.isBuffer(b);
+};
+/* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(14).Buffer))
+
+/***/ }),
+/* 12 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -2106,7 +3614,7 @@ exports.XMLSerializer = XMLSerializer;
 //}
 
 /***/ }),
-/* 5 */
+/* 13 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -2176,4206 +3684,7 @@ module.exports = function xmlMatcher(content, tagsXmlArray) {
 };
 
 /***/ }),
-/* 6 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
-
-var _docxtemplater = __webpack_require__(7);
-
-var _docxtemplater2 = _interopRequireDefault(_docxtemplater);
-
-var _jszip = __webpack_require__(44);
-
-var _jszip2 = _interopRequireDefault(_jszip);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
-
-var InspectModule = function () {
-	function InspectModule() {
-		_classCallCheck(this, InspectModule);
-
-		this.inspect = {};
-		this.fullInspected = {};
-		this.filePath = null;
-	}
-
-	_createClass(InspectModule, [{
-		key: "set",
-		value: function set(obj) {
-			if (obj.inspect) {
-				if (obj.inspect.filePath) {
-					this.filePath = obj.inspect.filePath;
-				}
-				this.inspect = Object.assign(this.inspect, obj.inspect);
-				this.fullInspected[this.filePath] = this.inspect;
-			}
-		}
-	}]);
-
-	return InspectModule;
-}();
-
-var state = {};
-function handleFileSelect(evt) {
-	// Retrieve the first (and only!) File from the FileList object
-	var f = evt.target.files[0];
-	if (f) {
-		var r = new FileReader();
-		r.onload = function (e) {
-			console.log("Loading template");
-			readQuestionsFromDoc(e.target.result);
-			console.log("Loaded template");
-		};
-		r.readAsBinaryString(f);
-	} else {
-		console.log("Error reading file");
-	}
-}
-document.getElementById('files').addEventListener('change', handleFileSelect, false);
-
-function readQuestionsFromDoc(file) {
-	setProcessingTemplate();
-	var zip = new _jszip2.default(file);
-	var data = zip.files["word/document.xml"]._data.getContent();
-	var string = new TextDecoder("utf-8").decode(data);
-	var xml = string,
-	    xmlDoc = $.parseXML(xml),
-	    $xml = $(xmlDoc);
-	console.log($xml);
-	var table = $xml.find('w\\:tbl,tbl').first();
-	console.log(table);
-	var rows = table.find('w\\:tr, tr');
-	console.log(rows);
-	var questions = [];
-	$.each(rows, function (key, row) {
-		debugger;
-		var elems = $(row).find('w\\:t, t');
-		if (elems.length === 3) {
-			questions.push({ question: elems[0].textContent, yesAnswer: elems[1].textContent, noAnswer: elems[2].textContent });
-		}
-	});
-	console.log(questions);
-
-	return questions;
-}
-
-function setProcessingTemplate() {}
-
-/***/ }),
-/* 7 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _createClass = function () {
-	function defineProperties(target, props) {
-		for (var i = 0; i < props.length; i++) {
-			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
-		}
-	}return function (Constructor, protoProps, staticProps) {
-		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
-	};
-}();
-
-function _classCallCheck(instance, Constructor) {
-	if (!(instance instanceof Constructor)) {
-		throw new TypeError("Cannot call a class as a function");
-	}
-}
-
-var DocUtils = __webpack_require__(0);
-DocUtils.traits = __webpack_require__(3);
-DocUtils.moduleWrapper = __webpack_require__(2);
-var defaults = DocUtils.defaults,
-    str2xml = DocUtils.str2xml,
-    xml2str = DocUtils.xml2str,
-    moduleWrapper = DocUtils.moduleWrapper,
-    concatArrays = DocUtils.concatArrays,
-    unique = DocUtils.unique;
-
-var _require = __webpack_require__(1),
-    XTInternalError = _require.XTInternalError,
-    throwFileTypeNotIdentified = _require.throwFileTypeNotIdentified,
-    throwFileTypeNotHandled = _require.throwFileTypeNotHandled;
-
-var Docxtemplater = function () {
-	function Docxtemplater() {
-		_classCallCheck(this, Docxtemplater);
-
-		if (arguments.length > 0) {
-			throw new Error("The constructor with parameters has been removed in docxtemplater 3.0, please check the upgrade guide.");
-		}
-		this.compiled = {};
-		this.modules = [];
-		this.setOptions({});
-	}
-
-	_createClass(Docxtemplater, [{
-		key: "setModules",
-		value: function setModules(obj) {
-			this.modules.forEach(function (module) {
-				module.set(obj);
-			});
-		}
-	}, {
-		key: "sendEvent",
-		value: function sendEvent(eventName) {
-			this.modules.forEach(function (module) {
-				module.on(eventName);
-			});
-		}
-	}, {
-		key: "attachModule",
-		value: function attachModule(module) {
-			var options = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
-			var prefix = options.prefix;
-
-			if (prefix) {
-				module.prefix = prefix;
-			}
-			this.modules.push(moduleWrapper(module));
-			return this;
-		}
-	}, {
-		key: "setOptions",
-		value: function setOptions(options) {
-			var _this = this;
-
-			this.options = options;
-			Object.keys(defaults).forEach(function (key) {
-				var defaultValue = defaults[key];
-				_this.options[key] = _this.options[key] != null ? _this.options[key] : defaultValue;
-				_this[key] = _this.options[key];
-			});
-			if (this.zip) {
-				this.updateFileTypeConfig();
-			}
-			return this;
-		}
-	}, {
-		key: "loadZip",
-		value: function loadZip(zip) {
-			if (zip.loadAsync) {
-				throw new XTInternalError("Docxtemplater doesn't handle JSZip version >=3, see changelog");
-			}
-			this.zip = zip;
-			this.updateFileTypeConfig();
-			return this;
-		}
-	}, {
-		key: "compileFile",
-		value: function compileFile(fileName) {
-			var currentFile = this.createTemplateClass(fileName);
-			currentFile.parse();
-			this.compiled[fileName] = currentFile;
-		}
-	}, {
-		key: "compile",
-		value: function compile() {
-			var _this2 = this;
-
-			if (Object.keys(this.compiled).length) {
-				return this;
-			}
-
-			this.modules = concatArrays([this.fileTypeConfig.baseModules.map(function (moduleFunction) {
-				return moduleFunction();
-			}), this.modules]);
-			this.options = this.modules.reduce(function (options, module) {
-				return module.optionsTransformer(options, _this2);
-			}, this.options);
-			this.options.xmlFileNames = unique(this.options.xmlFileNames);
-			this.xmlDocuments = this.options.xmlFileNames.reduce(function (xmlDocuments, fileName) {
-				var content = _this2.zip.files[fileName].asText();
-				xmlDocuments[fileName] = str2xml(content);
-				return xmlDocuments;
-			}, {});
-			this.setModules({
-				zip: this.zip,
-				xmlDocuments: this.xmlDocuments,
-				data: this.data
-			});
-			this.getTemplatedFiles();
-			this.setModules({ compiled: this.compiled });
-			// Loop inside all templatedFiles (ie xml files with content).
-			// Sometimes they don't exist (footer.xml for example)
-			this.templatedFiles.forEach(function (fileName) {
-				if (_this2.zip.files[fileName] != null) {
-					_this2.compileFile(fileName);
-				}
-			});
-			return this;
-		}
-	}, {
-		key: "updateFileTypeConfig",
-		value: function updateFileTypeConfig() {
-			var fileType = void 0;
-			if (this.zip.files.mimetype) {
-				fileType = "odt";
-			}
-			if (this.zip.files["word/document.xml"] || this.zip.files["word/document2.xml"]) {
-				fileType = "docx";
-			}
-			if (this.zip.files["ppt/presentation.xml"]) {
-				fileType = "pptx";
-			}
-
-			if (fileType === "odt") {
-				throwFileTypeNotHandled(fileType);
-			}
-			if (!fileType) {
-				throwFileTypeNotIdentified();
-			}
-			this.fileType = fileType;
-			this.fileTypeConfig = this.options.fileTypeConfig || Docxtemplater.FileTypeConfig[this.fileType];
-			return this;
-		}
-	}, {
-		key: "render",
-		value: function render() {
-			var _this3 = this;
-
-			this.compile();
-			this.mapper = this.modules.reduce(function (value, module) {
-				return module.getRenderedMap(value);
-			}, {});
-
-			this.fileTypeConfig.tagsXmlLexedArray = unique(this.fileTypeConfig.tagsXmlLexedArray);
-			this.fileTypeConfig.tagsXmlTextArray = unique(this.fileTypeConfig.tagsXmlTextArray);
-
-			Object.keys(this.mapper).forEach(function (to) {
-				var _mapper$to = _this3.mapper[to],
-				    from = _mapper$to.from,
-				    data = _mapper$to.data;
-
-				var currentFile = _this3.compiled[from];
-				currentFile.setTags(data);
-				currentFile.render(to);
-				_this3.zip.file(to, currentFile.content, { createFolders: true });
-			});
-			this.sendEvent("syncing-zip");
-			this.syncZip();
-			return this;
-		}
-	}, {
-		key: "syncZip",
-		value: function syncZip() {
-			var _this4 = this;
-
-			Object.keys(this.xmlDocuments).forEach(function (fileName) {
-				_this4.zip.remove(fileName);
-				var content = xml2str(_this4.xmlDocuments[fileName]);
-				return _this4.zip.file(fileName, content, { createFolders: true });
-			});
-		}
-	}, {
-		key: "setData",
-		value: function setData(data) {
-			this.data = data;
-			return this;
-		}
-	}, {
-		key: "getZip",
-		value: function getZip() {
-			return this.zip;
-		}
-	}, {
-		key: "createTemplateClass",
-		value: function createTemplateClass(path) {
-			var usedData = this.zip.files[path].asText();
-			return this.createTemplateClassFromContent(usedData, path);
-		}
-	}, {
-		key: "createTemplateClassFromContent",
-		value: function createTemplateClassFromContent(content, filePath) {
-			var _this5 = this;
-
-			var xmltOptions = {
-				filePath: filePath
-			};
-			Object.keys(defaults).forEach(function (key) {
-				xmltOptions[key] = _this5[key];
-			});
-			xmltOptions.fileTypeConfig = this.fileTypeConfig;
-			xmltOptions.modules = this.modules;
-			return new Docxtemplater.XmlTemplater(content, xmltOptions);
-		}
-	}, {
-		key: "getFullText",
-		value: function getFullText(path) {
-			return this.createTemplateClass(path || this.fileTypeConfig.textPath(this.zip)).getFullText();
-		}
-	}, {
-		key: "getTemplatedFiles",
-		value: function getTemplatedFiles() {
-			this.templatedFiles = this.fileTypeConfig.getTemplatedFiles(this.zip);
-			return this.templatedFiles;
-		}
-	}]);
-
-	return Docxtemplater;
-}();
-
-Docxtemplater.DocUtils = DocUtils;
-Docxtemplater.Errors = __webpack_require__(1);
-Docxtemplater.XmlTemplater = __webpack_require__(10);
-Docxtemplater.FileTypeConfig = __webpack_require__(15);
-Docxtemplater.XmlMatcher = __webpack_require__(5);
-module.exports = Docxtemplater;
-
-/***/ }),
-/* 8 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-function DOMParser(options) {
-	this.options = options || { locator: {} };
-}
-DOMParser.prototype.parseFromString = function (source, mimeType) {
-	var options = this.options;
-	var sax = new XMLReader();
-	var domBuilder = options.domBuilder || new DOMHandler(); //contentHandler and LexicalHandler
-	var errorHandler = options.errorHandler;
-	var locator = options.locator;
-	var defaultNSMap = options.xmlns || {};
-	var entityMap = { 'lt': '<', 'gt': '>', 'amp': '&', 'quot': '"', 'apos': "'" };
-	if (locator) {
-		domBuilder.setDocumentLocator(locator);
-	}
-
-	sax.errorHandler = buildErrorHandler(errorHandler, domBuilder, locator);
-	sax.domBuilder = options.domBuilder || domBuilder;
-	if (/\/x?html?$/.test(mimeType)) {
-		entityMap.nbsp = '\xa0';
-		entityMap.copy = '\xa9';
-		defaultNSMap[''] = 'http://www.w3.org/1999/xhtml';
-	}
-	defaultNSMap.xml = defaultNSMap.xml || 'http://www.w3.org/XML/1998/namespace';
-	if (source) {
-		sax.parse(source, defaultNSMap, entityMap);
-	} else {
-		sax.errorHandler.error("invalid doc source");
-	}
-	return domBuilder.doc;
-};
-function buildErrorHandler(errorImpl, domBuilder, locator) {
-	if (!errorImpl) {
-		if (domBuilder instanceof DOMHandler) {
-			return domBuilder;
-		}
-		errorImpl = domBuilder;
-	}
-	var errorHandler = {};
-	var isCallback = errorImpl instanceof Function;
-	locator = locator || {};
-	function build(key) {
-		var fn = errorImpl[key];
-		if (!fn && isCallback) {
-			fn = errorImpl.length == 2 ? function (msg) {
-				errorImpl(key, msg);
-			} : errorImpl;
-		}
-		errorHandler[key] = fn && function (msg) {
-			fn('[xmldom ' + key + ']\t' + msg + _locator(locator));
-		} || function () {};
-	}
-	build('warning');
-	build('error');
-	build('fatalError');
-	return errorHandler;
-}
-
-//console.log('#\n\n\n\n\n\n\n####')
-/**
- * +ContentHandler+ErrorHandler
- * +LexicalHandler+EntityResolver2
- * -DeclHandler-DTDHandler 
- * 
- * DefaultHandler:EntityResolver, DTDHandler, ContentHandler, ErrorHandler
- * DefaultHandler2:DefaultHandler,LexicalHandler, DeclHandler, EntityResolver2
- * @link http://www.saxproject.org/apidoc/org/xml/sax/helpers/DefaultHandler.html
- */
-function DOMHandler() {
-	this.cdata = false;
-}
-function position(locator, node) {
-	node.lineNumber = locator.lineNumber;
-	node.columnNumber = locator.columnNumber;
-}
-/**
- * @see org.xml.sax.ContentHandler#startDocument
- * @link http://www.saxproject.org/apidoc/org/xml/sax/ContentHandler.html
- */
-DOMHandler.prototype = {
-	startDocument: function startDocument() {
-		this.doc = new DOMImplementation().createDocument(null, null, null);
-		if (this.locator) {
-			this.doc.documentURI = this.locator.systemId;
-		}
-	},
-	startElement: function startElement(namespaceURI, localName, qName, attrs) {
-		var doc = this.doc;
-		var el = doc.createElementNS(namespaceURI, qName || localName);
-		var len = attrs.length;
-		appendElement(this, el);
-		this.currentElement = el;
-
-		this.locator && position(this.locator, el);
-		for (var i = 0; i < len; i++) {
-			var namespaceURI = attrs.getURI(i);
-			var value = attrs.getValue(i);
-			var qName = attrs.getQName(i);
-			var attr = doc.createAttributeNS(namespaceURI, qName);
-			this.locator && position(attrs.getLocator(i), attr);
-			attr.value = attr.nodeValue = value;
-			el.setAttributeNode(attr);
-		}
-	},
-	endElement: function endElement(namespaceURI, localName, qName) {
-		var current = this.currentElement;
-		var tagName = current.tagName;
-		this.currentElement = current.parentNode;
-	},
-	startPrefixMapping: function startPrefixMapping(prefix, uri) {},
-	endPrefixMapping: function endPrefixMapping(prefix) {},
-	processingInstruction: function processingInstruction(target, data) {
-		var ins = this.doc.createProcessingInstruction(target, data);
-		this.locator && position(this.locator, ins);
-		appendElement(this, ins);
-	},
-	ignorableWhitespace: function ignorableWhitespace(ch, start, length) {},
-	characters: function characters(chars, start, length) {
-		chars = _toString.apply(this, arguments);
-		//console.log(chars)
-		if (chars) {
-			if (this.cdata) {
-				var charNode = this.doc.createCDATASection(chars);
-			} else {
-				var charNode = this.doc.createTextNode(chars);
-			}
-			if (this.currentElement) {
-				this.currentElement.appendChild(charNode);
-			} else if (/^\s*$/.test(chars)) {
-				this.doc.appendChild(charNode);
-				//process xml
-			}
-			this.locator && position(this.locator, charNode);
-		}
-	},
-	skippedEntity: function skippedEntity(name) {},
-	endDocument: function endDocument() {
-		this.doc.normalize();
-	},
-	setDocumentLocator: function setDocumentLocator(locator) {
-		if (this.locator = locator) {
-			// && !('lineNumber' in locator)){
-			locator.lineNumber = 0;
-		}
-	},
-	//LexicalHandler
-	comment: function comment(chars, start, length) {
-		chars = _toString.apply(this, arguments);
-		var comm = this.doc.createComment(chars);
-		this.locator && position(this.locator, comm);
-		appendElement(this, comm);
-	},
-
-	startCDATA: function startCDATA() {
-		//used in characters() methods
-		this.cdata = true;
-	},
-	endCDATA: function endCDATA() {
-		this.cdata = false;
-	},
-
-	startDTD: function startDTD(name, publicId, systemId) {
-		var impl = this.doc.implementation;
-		if (impl && impl.createDocumentType) {
-			var dt = impl.createDocumentType(name, publicId, systemId);
-			this.locator && position(this.locator, dt);
-			appendElement(this, dt);
-		}
-	},
-	/**
-  * @see org.xml.sax.ErrorHandler
-  * @link http://www.saxproject.org/apidoc/org/xml/sax/ErrorHandler.html
-  */
-	warning: function warning(error) {
-		console.warn('[xmldom warning]\t' + error, _locator(this.locator));
-	},
-	error: function error(_error) {
-		console.error('[xmldom error]\t' + _error, _locator(this.locator));
-	},
-	fatalError: function fatalError(error) {
-		console.error('[xmldom fatalError]\t' + error, _locator(this.locator));
-		throw error;
-	}
-};
-function _locator(l) {
-	if (l) {
-		return '\n@' + (l.systemId || '') + '#[line:' + l.lineNumber + ',col:' + l.columnNumber + ']';
-	}
-}
-function _toString(chars, start, length) {
-	if (typeof chars == 'string') {
-		return chars.substr(start, length);
-	} else {
-		//java sax connect width xmldom on rhino(what about: "? && !(chars instanceof String)")
-		if (chars.length >= start + length || start) {
-			return new java.lang.String(chars, start, length) + '';
-		}
-		return chars;
-	}
-}
-
-/*
- * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/LexicalHandler.html
- * used method of org.xml.sax.ext.LexicalHandler:
- *  #comment(chars, start, length)
- *  #startCDATA()
- *  #endCDATA()
- *  #startDTD(name, publicId, systemId)
- *
- *
- * IGNORED method of org.xml.sax.ext.LexicalHandler:
- *  #endDTD()
- *  #startEntity(name)
- *  #endEntity(name)
- *
- *
- * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/DeclHandler.html
- * IGNORED method of org.xml.sax.ext.DeclHandler
- * 	#attributeDecl(eName, aName, type, mode, value)
- *  #elementDecl(name, model)
- *  #externalEntityDecl(name, publicId, systemId)
- *  #internalEntityDecl(name, value)
- * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/EntityResolver2.html
- * IGNORED method of org.xml.sax.EntityResolver2
- *  #resolveEntity(String name,String publicId,String baseURI,String systemId)
- *  #resolveEntity(publicId, systemId)
- *  #getExternalSubset(name, baseURI)
- * @link http://www.saxproject.org/apidoc/org/xml/sax/DTDHandler.html
- * IGNORED method of org.xml.sax.DTDHandler
- *  #notationDecl(name, publicId, systemId) {};
- *  #unparsedEntityDecl(name, publicId, systemId, notationName) {};
- */
-"endDTD,startEntity,endEntity,attributeDecl,elementDecl,externalEntityDecl,internalEntityDecl,resolveEntity,getExternalSubset,notationDecl,unparsedEntityDecl".replace(/\w+/g, function (key) {
-	DOMHandler.prototype[key] = function () {
-		return null;
-	};
-});
-
-/* Private static helpers treated below as private instance methods, so don't need to add these to the public API; we might use a Relator to also get rid of non-standard public properties */
-function appendElement(hander, node) {
-	if (!hander.currentElement) {
-		hander.doc.appendChild(node);
-	} else {
-		hander.currentElement.appendChild(node);
-	}
-} //appendChild and setAttributeNS are preformance key
-
-//if(typeof require == 'function'){
-var XMLReader = __webpack_require__(9).XMLReader;
-var DOMImplementation = exports.DOMImplementation = __webpack_require__(4).DOMImplementation;
-exports.XMLSerializer = __webpack_require__(4).XMLSerializer;
-exports.DOMParser = DOMParser;
-//}
-
-/***/ }),
-/* 9 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-//[4]   	NameStartChar	   ::=   	":" | [A-Z] | "_" | [a-z] | [#xC0-#xD6] | [#xD8-#xF6] | [#xF8-#x2FF] | [#x370-#x37D] | [#x37F-#x1FFF] | [#x200C-#x200D] | [#x2070-#x218F] | [#x2C00-#x2FEF] | [#x3001-#xD7FF] | [#xF900-#xFDCF] | [#xFDF0-#xFFFD] | [#x10000-#xEFFFF]
-//[4a]   	NameChar	   ::=   	NameStartChar | "-" | "." | [0-9] | #xB7 | [#x0300-#x036F] | [#x203F-#x2040]
-//[5]   	Name	   ::=   	NameStartChar (NameChar)*
-var nameStartChar = /[A-Z_a-z\xC0-\xD6\xD8-\xF6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/; //\u10000-\uEFFFF
-var nameChar = new RegExp("[\\-\\.0-9" + nameStartChar.source.slice(1, -1) + "\\u00B7\\u0300-\\u036F\\u203F-\\u2040]");
-var tagNamePattern = new RegExp('^' + nameStartChar.source + nameChar.source + '*(?:\:' + nameStartChar.source + nameChar.source + '*)?$');
-//var tagNamePattern = /^[a-zA-Z_][\w\-\.]*(?:\:[a-zA-Z_][\w\-\.]*)?$/
-//var handlers = 'resolveEntity,getExternalSubset,characters,endDocument,endElement,endPrefixMapping,ignorableWhitespace,processingInstruction,setDocumentLocator,skippedEntity,startDocument,startElement,startPrefixMapping,notationDecl,unparsedEntityDecl,error,fatalError,warning,attributeDecl,elementDecl,externalEntityDecl,internalEntityDecl,comment,endCDATA,endDTD,endEntity,startCDATA,startDTD,startEntity'.split(',')
-
-//S_TAG,	S_ATTR,	S_EQ,	S_ATTR_NOQUOT_VALUE
-//S_ATTR_SPACE,	S_ATTR_END,	S_TAG_SPACE, S_TAG_CLOSE
-var S_TAG = 0; //tag name offerring
-var S_ATTR = 1; //attr name offerring 
-var S_ATTR_SPACE = 2; //attr name end and space offer
-var S_EQ = 3; //=space?
-var S_ATTR_NOQUOT_VALUE = 4; //attr value(no quot value only)
-var S_ATTR_END = 5; //attr value end and no space(quot end)
-var S_TAG_SPACE = 6; //(attr value end || tag end ) && (space offer)
-var S_TAG_CLOSE = 7; //closed el<el />
-
-function XMLReader() {}
-
-XMLReader.prototype = {
-	parse: function parse(source, defaultNSMap, entityMap) {
-		var domBuilder = this.domBuilder;
-		domBuilder.startDocument();
-		_copy(defaultNSMap, defaultNSMap = {});
-		_parse(source, defaultNSMap, entityMap, domBuilder, this.errorHandler);
-		domBuilder.endDocument();
-	}
-};
-function _parse(source, defaultNSMapCopy, entityMap, domBuilder, errorHandler) {
-	function fixedFromCharCode(code) {
-		// String.prototype.fromCharCode does not supports
-		// > 2 bytes unicode chars directly
-		if (code > 0xffff) {
-			code -= 0x10000;
-			var surrogate1 = 0xd800 + (code >> 10),
-			    surrogate2 = 0xdc00 + (code & 0x3ff);
-
-			return String.fromCharCode(surrogate1, surrogate2);
-		} else {
-			return String.fromCharCode(code);
-		}
-	}
-	function entityReplacer(a) {
-		var k = a.slice(1, -1);
-		if (k in entityMap) {
-			return entityMap[k];
-		} else if (k.charAt(0) === '#') {
-			return fixedFromCharCode(parseInt(k.substr(1).replace('x', '0x')));
-		} else {
-			errorHandler.error('entity not found:' + a);
-			return a;
-		}
-	}
-	function appendText(end) {
-		//has some bugs
-		if (end > start) {
-			var xt = source.substring(start, end).replace(/&#?\w+;/g, entityReplacer);
-			locator && position(start);
-			domBuilder.characters(xt, 0, end - start);
-			start = end;
-		}
-	}
-	function position(p, m) {
-		while (p >= lineEnd && (m = linePattern.exec(source))) {
-			lineStart = m.index;
-			lineEnd = lineStart + m[0].length;
-			locator.lineNumber++;
-			//console.log('line++:',locator,startPos,endPos)
-		}
-		locator.columnNumber = p - lineStart + 1;
-	}
-	var lineStart = 0;
-	var lineEnd = 0;
-	var linePattern = /.*(?:\r\n?|\n)|.*$/g;
-	var locator = domBuilder.locator;
-
-	var parseStack = [{ currentNSMap: defaultNSMapCopy }];
-	var closeMap = {};
-	var start = 0;
-	while (true) {
-		try {
-			var tagStart = source.indexOf('<', start);
-			if (tagStart < 0) {
-				if (!source.substr(start).match(/^\s*$/)) {
-					var doc = domBuilder.doc;
-					var text = doc.createTextNode(source.substr(start));
-					doc.appendChild(text);
-					domBuilder.currentElement = text;
-				}
-				return;
-			}
-			if (tagStart > start) {
-				appendText(tagStart);
-			}
-			switch (source.charAt(tagStart + 1)) {
-				case '/':
-					var end = source.indexOf('>', tagStart + 3);
-					var tagName = source.substring(tagStart + 2, end);
-					var config = parseStack.pop();
-					if (end < 0) {
-
-						tagName = source.substring(tagStart + 2).replace(/[\s<].*/, '');
-						//console.error('#@@@@@@'+tagName)
-						errorHandler.error("end tag name: " + tagName + ' is not complete:' + config.tagName);
-						end = tagStart + 1 + tagName.length;
-					} else if (tagName.match(/\s</)) {
-						tagName = tagName.replace(/[\s<].*/, '');
-						errorHandler.error("end tag name: " + tagName + ' maybe not complete');
-						end = tagStart + 1 + tagName.length;
-					}
-					//console.error(parseStack.length,parseStack)
-					//console.error(config);
-					var localNSMap = config.localNSMap;
-					var endMatch = config.tagName == tagName;
-					var endIgnoreCaseMach = endMatch || config.tagName && config.tagName.toLowerCase() == tagName.toLowerCase();
-					if (endIgnoreCaseMach) {
-						domBuilder.endElement(config.uri, config.localName, tagName);
-						if (localNSMap) {
-							for (var prefix in localNSMap) {
-								domBuilder.endPrefixMapping(prefix);
-							}
-						}
-						if (!endMatch) {
-							errorHandler.fatalError("end tag name: " + tagName + ' is not match the current start tagName:' + config.tagName);
-						}
-					} else {
-						parseStack.push(config);
-					}
-
-					end++;
-					break;
-				// end elment
-				case '?':
-					// <?...?>
-					locator && position(tagStart);
-					end = parseInstruction(source, tagStart, domBuilder);
-					break;
-				case '!':
-					// <!doctype,<![CDATA,<!--
-					locator && position(tagStart);
-					end = parseDCC(source, tagStart, domBuilder, errorHandler);
-					break;
-				default:
-					locator && position(tagStart);
-					var el = new ElementAttributes();
-					var currentNSMap = parseStack[parseStack.length - 1].currentNSMap;
-					//elStartEnd
-					var end = parseElementStartPart(source, tagStart, el, currentNSMap, entityReplacer, errorHandler);
-					var len = el.length;
-
-					if (!el.closed && fixSelfClosed(source, end, el.tagName, closeMap)) {
-						el.closed = true;
-						if (!entityMap.nbsp) {
-							errorHandler.warning('unclosed xml attribute');
-						}
-					}
-					if (locator && len) {
-						var locator2 = copyLocator(locator, {});
-						//try{//attribute position fixed
-						for (var i = 0; i < len; i++) {
-							var a = el[i];
-							position(a.offset);
-							a.locator = copyLocator(locator, {});
-						}
-						//}catch(e){console.error('@@@@@'+e)}
-						domBuilder.locator = locator2;
-						if (appendElement(el, domBuilder, currentNSMap)) {
-							parseStack.push(el);
-						}
-						domBuilder.locator = locator;
-					} else {
-						if (appendElement(el, domBuilder, currentNSMap)) {
-							parseStack.push(el);
-						}
-					}
-
-					if (el.uri === 'http://www.w3.org/1999/xhtml' && !el.closed) {
-						end = parseHtmlSpecialContent(source, end, el.tagName, entityReplacer, domBuilder);
-					} else {
-						end++;
-					}
-			}
-		} catch (e) {
-			errorHandler.error('element parse error: ' + e);
-			//errorHandler.error('element parse error: '+e);
-			end = -1;
-			//throw e;
-		}
-		if (end > start) {
-			start = end;
-		} else {
-			//TODO: 这里有可能sax回退，有位置错误风险
-			appendText(Math.max(tagStart, start) + 1);
-		}
-	}
-}
-function copyLocator(f, t) {
-	t.lineNumber = f.lineNumber;
-	t.columnNumber = f.columnNumber;
-	return t;
-}
-
-/**
- * @see #appendElement(source,elStartEnd,el,selfClosed,entityReplacer,domBuilder,parseStack);
- * @return end of the elementStartPart(end of elementEndPart for selfClosed el)
- */
-function parseElementStartPart(source, start, el, currentNSMap, entityReplacer, errorHandler) {
-	var attrName;
-	var value;
-	var p = ++start;
-	var s = S_TAG; //status
-	while (true) {
-		var c = source.charAt(p);
-		switch (c) {
-			case '=':
-				if (s === S_ATTR) {
-					//attrName
-					attrName = source.slice(start, p);
-					s = S_EQ;
-				} else if (s === S_ATTR_SPACE) {
-					s = S_EQ;
-				} else {
-					//fatalError: equal must after attrName or space after attrName
-					throw new Error('attribute equal must after attrName');
-				}
-				break;
-			case '\'':
-			case '"':
-				if (s === S_EQ || s === S_ATTR //|| s == S_ATTR_SPACE
-				) {
-						//equal
-						if (s === S_ATTR) {
-							errorHandler.warning('attribute value must after "="');
-							attrName = source.slice(start, p);
-						}
-						start = p + 1;
-						p = source.indexOf(c, start);
-						if (p > 0) {
-							value = source.slice(start, p).replace(/&#?\w+;/g, entityReplacer);
-							el.add(attrName, value, start - 1);
-							s = S_ATTR_END;
-						} else {
-							//fatalError: no end quot match
-							throw new Error('attribute value no end \'' + c + '\' match');
-						}
-					} else if (s == S_ATTR_NOQUOT_VALUE) {
-					value = source.slice(start, p).replace(/&#?\w+;/g, entityReplacer);
-					//console.log(attrName,value,start,p)
-					el.add(attrName, value, start);
-					//console.dir(el)
-					errorHandler.warning('attribute "' + attrName + '" missed start quot(' + c + ')!!');
-					start = p + 1;
-					s = S_ATTR_END;
-				} else {
-					//fatalError: no equal before
-					throw new Error('attribute value must after "="');
-				}
-				break;
-			case '/':
-				switch (s) {
-					case S_TAG:
-						el.setTagName(source.slice(start, p));
-					case S_ATTR_END:
-					case S_TAG_SPACE:
-					case S_TAG_CLOSE:
-						s = S_TAG_CLOSE;
-						el.closed = true;
-					case S_ATTR_NOQUOT_VALUE:
-					case S_ATTR:
-					case S_ATTR_SPACE:
-						break;
-					//case S_EQ:
-					default:
-						throw new Error("attribute invalid close char('/')");
-				}
-				break;
-			case '':
-				//end document
-				//throw new Error('unexpected end of input')
-				errorHandler.error('unexpected end of input');
-				if (s == S_TAG) {
-					el.setTagName(source.slice(start, p));
-				}
-				return p;
-			case '>':
-				switch (s) {
-					case S_TAG:
-						el.setTagName(source.slice(start, p));
-					case S_ATTR_END:
-					case S_TAG_SPACE:
-					case S_TAG_CLOSE:
-						break; //normal
-					case S_ATTR_NOQUOT_VALUE: //Compatible state
-					case S_ATTR:
-						value = source.slice(start, p);
-						if (value.slice(-1) === '/') {
-							el.closed = true;
-							value = value.slice(0, -1);
-						}
-					case S_ATTR_SPACE:
-						if (s === S_ATTR_SPACE) {
-							value = attrName;
-						}
-						if (s == S_ATTR_NOQUOT_VALUE) {
-							errorHandler.warning('attribute "' + value + '" missed quot(")!!');
-							el.add(attrName, value.replace(/&#?\w+;/g, entityReplacer), start);
-						} else {
-							if (currentNSMap[''] !== 'http://www.w3.org/1999/xhtml' || !value.match(/^(?:disabled|checked|selected)$/i)) {
-								errorHandler.warning('attribute "' + value + '" missed value!! "' + value + '" instead!!');
-							}
-							el.add(value, value, start);
-						}
-						break;
-					case S_EQ:
-						throw new Error('attribute value missed!!');
-				}
-				//			console.log(tagName,tagNamePattern,tagNamePattern.test(tagName))
-				return p;
-			/*xml space '\x20' | #x9 | #xD | #xA; */
-			case "\x80":
-				c = ' ';
-			default:
-				if (c <= ' ') {
-					//space
-					switch (s) {
-						case S_TAG:
-							el.setTagName(source.slice(start, p)); //tagName
-							s = S_TAG_SPACE;
-							break;
-						case S_ATTR:
-							attrName = source.slice(start, p);
-							s = S_ATTR_SPACE;
-							break;
-						case S_ATTR_NOQUOT_VALUE:
-							var value = source.slice(start, p).replace(/&#?\w+;/g, entityReplacer);
-							errorHandler.warning('attribute "' + value + '" missed quot(")!!');
-							el.add(attrName, value, start);
-						case S_ATTR_END:
-							s = S_TAG_SPACE;
-							break;
-						//case S_TAG_SPACE:
-						//case S_EQ:
-						//case S_ATTR_SPACE:
-						//	void();break;
-						//case S_TAG_CLOSE:
-						//ignore warning
-					}
-				} else {
-					//not space
-					//S_TAG,	S_ATTR,	S_EQ,	S_ATTR_NOQUOT_VALUE
-					//S_ATTR_SPACE,	S_ATTR_END,	S_TAG_SPACE, S_TAG_CLOSE
-					switch (s) {
-						//case S_TAG:void();break;
-						//case S_ATTR:void();break;
-						//case S_ATTR_NOQUOT_VALUE:void();break;
-						case S_ATTR_SPACE:
-							var tagName = el.tagName;
-							if (currentNSMap[''] !== 'http://www.w3.org/1999/xhtml' || !attrName.match(/^(?:disabled|checked|selected)$/i)) {
-								errorHandler.warning('attribute "' + attrName + '" missed value!! "' + attrName + '" instead2!!');
-							}
-							el.add(attrName, attrName, start);
-							start = p;
-							s = S_ATTR;
-							break;
-						case S_ATTR_END:
-							errorHandler.warning('attribute space is required"' + attrName + '"!!');
-						case S_TAG_SPACE:
-							s = S_ATTR;
-							start = p;
-							break;
-						case S_EQ:
-							s = S_ATTR_NOQUOT_VALUE;
-							start = p;
-							break;
-						case S_TAG_CLOSE:
-							throw new Error("elements closed character '/' and '>' must be connected to");
-					}
-				}
-		} //end outer switch
-		//console.log('p++',p)
-		p++;
-	}
-}
-/**
- * @return true if has new namespace define
- */
-function appendElement(el, domBuilder, currentNSMap) {
-	var tagName = el.tagName;
-	var localNSMap = null;
-	//var currentNSMap = parseStack[parseStack.length-1].currentNSMap;
-	var i = el.length;
-	while (i--) {
-		var a = el[i];
-		var qName = a.qName;
-		var value = a.value;
-		var nsp = qName.indexOf(':');
-		if (nsp > 0) {
-			var prefix = a.prefix = qName.slice(0, nsp);
-			var localName = qName.slice(nsp + 1);
-			var nsPrefix = prefix === 'xmlns' && localName;
-		} else {
-			localName = qName;
-			prefix = null;
-			nsPrefix = qName === 'xmlns' && '';
-		}
-		//can not set prefix,because prefix !== ''
-		a.localName = localName;
-		//prefix == null for no ns prefix attribute 
-		if (nsPrefix !== false) {
-			//hack!!
-			if (localNSMap == null) {
-				localNSMap = {};
-				//console.log(currentNSMap,0)
-				_copy(currentNSMap, currentNSMap = {});
-				//console.log(currentNSMap,1)
-			}
-			currentNSMap[nsPrefix] = localNSMap[nsPrefix] = value;
-			a.uri = 'http://www.w3.org/2000/xmlns/';
-			domBuilder.startPrefixMapping(nsPrefix, value);
-		}
-	}
-	var i = el.length;
-	while (i--) {
-		a = el[i];
-		var prefix = a.prefix;
-		if (prefix) {
-			//no prefix attribute has no namespace
-			if (prefix === 'xml') {
-				a.uri = 'http://www.w3.org/XML/1998/namespace';
-			}if (prefix !== 'xmlns') {
-				a.uri = currentNSMap[prefix || ''];
-
-				//{console.log('###'+a.qName,domBuilder.locator.systemId+'',currentNSMap,a.uri)}
-			}
-		}
-	}
-	var nsp = tagName.indexOf(':');
-	if (nsp > 0) {
-		prefix = el.prefix = tagName.slice(0, nsp);
-		localName = el.localName = tagName.slice(nsp + 1);
-	} else {
-		prefix = null; //important!!
-		localName = el.localName = tagName;
-	}
-	//no prefix element has default namespace
-	var ns = el.uri = currentNSMap[prefix || ''];
-	domBuilder.startElement(ns, localName, tagName, el);
-	//endPrefixMapping and startPrefixMapping have not any help for dom builder
-	//localNSMap = null
-	if (el.closed) {
-		domBuilder.endElement(ns, localName, tagName);
-		if (localNSMap) {
-			for (prefix in localNSMap) {
-				domBuilder.endPrefixMapping(prefix);
-			}
-		}
-	} else {
-		el.currentNSMap = currentNSMap;
-		el.localNSMap = localNSMap;
-		//parseStack.push(el);
-		return true;
-	}
-}
-function parseHtmlSpecialContent(source, elStartEnd, tagName, entityReplacer, domBuilder) {
-	if (/^(?:script|textarea)$/i.test(tagName)) {
-		var elEndStart = source.indexOf('</' + tagName + '>', elStartEnd);
-		var text = source.substring(elStartEnd + 1, elEndStart);
-		if (/[&<]/.test(text)) {
-			if (/^script$/i.test(tagName)) {
-				//if(!/\]\]>/.test(text)){
-				//lexHandler.startCDATA();
-				domBuilder.characters(text, 0, text.length);
-				//lexHandler.endCDATA();
-				return elEndStart;
-				//}
-			} //}else{//text area
-			text = text.replace(/&#?\w+;/g, entityReplacer);
-			domBuilder.characters(text, 0, text.length);
-			return elEndStart;
-			//}
-		}
-	}
-	return elStartEnd + 1;
-}
-function fixSelfClosed(source, elStartEnd, tagName, closeMap) {
-	//if(tagName in closeMap){
-	var pos = closeMap[tagName];
-	if (pos == null) {
-		//console.log(tagName)
-		pos = source.lastIndexOf('</' + tagName + '>');
-		if (pos < elStartEnd) {
-			//忘记闭合
-			pos = source.lastIndexOf('</' + tagName);
-		}
-		closeMap[tagName] = pos;
-	}
-	return pos < elStartEnd;
-	//} 
-}
-function _copy(source, target) {
-	for (var n in source) {
-		target[n] = source[n];
-	}
-}
-function parseDCC(source, start, domBuilder, errorHandler) {
-	//sure start with '<!'
-	var next = source.charAt(start + 2);
-	switch (next) {
-		case '-':
-			if (source.charAt(start + 3) === '-') {
-				var end = source.indexOf('-->', start + 4);
-				//append comment source.substring(4,end)//<!--
-				if (end > start) {
-					domBuilder.comment(source, start + 4, end - start - 4);
-					return end + 3;
-				} else {
-					errorHandler.error("Unclosed comment");
-					return -1;
-				}
-			} else {
-				//error
-				return -1;
-			}
-		default:
-			if (source.substr(start + 3, 6) == 'CDATA[') {
-				var end = source.indexOf(']]>', start + 9);
-				domBuilder.startCDATA();
-				domBuilder.characters(source, start + 9, end - start - 9);
-				domBuilder.endCDATA();
-				return end + 3;
-			}
-			//<!DOCTYPE
-			//startDTD(java.lang.String name, java.lang.String publicId, java.lang.String systemId) 
-			var matchs = split(source, start);
-			var len = matchs.length;
-			if (len > 1 && /!doctype/i.test(matchs[0][0])) {
-				var name = matchs[1][0];
-				var pubid = len > 3 && /^public$/i.test(matchs[2][0]) && matchs[3][0];
-				var sysid = len > 4 && matchs[4][0];
-				var lastMatch = matchs[len - 1];
-				domBuilder.startDTD(name, pubid && pubid.replace(/^(['"])(.*?)\1$/, '$2'), sysid && sysid.replace(/^(['"])(.*?)\1$/, '$2'));
-				domBuilder.endDTD();
-
-				return lastMatch.index + lastMatch[0].length;
-			}
-	}
-	return -1;
-}
-
-function parseInstruction(source, start, domBuilder) {
-	var end = source.indexOf('?>', start);
-	if (end) {
-		var match = source.substring(start, end).match(/^<\?(\S*)\s*([\s\S]*?)\s*$/);
-		if (match) {
-			var len = match[0].length;
-			domBuilder.processingInstruction(match[1], match[2]);
-			return end + 2;
-		} else {
-			//error
-			return -1;
-		}
-	}
-	return -1;
-}
-
-/**
- * @param source
- */
-function ElementAttributes(source) {}
-ElementAttributes.prototype = {
-	setTagName: function setTagName(tagName) {
-		if (!tagNamePattern.test(tagName)) {
-			throw new Error('invalid tagName:' + tagName);
-		}
-		this.tagName = tagName;
-	},
-	add: function add(qName, value, offset) {
-		if (!tagNamePattern.test(qName)) {
-			throw new Error('invalid attribute:' + qName);
-		}
-		this[this.length++] = { qName: qName, value: value, offset: offset };
-	},
-	length: 0,
-	getLocalName: function getLocalName(i) {
-		return this[i].localName;
-	},
-	getLocator: function getLocator(i) {
-		return this[i].locator;
-	},
-	getQName: function getQName(i) {
-		return this[i].qName;
-	},
-	getURI: function getURI(i) {
-		return this[i].uri;
-	},
-	getValue: function getValue(i) {
-		return this[i].value;
-	}
-	//	,getIndex:function(uri, localName)){
-	//		if(localName){
-	//			
-	//		}else{
-	//			var qName = uri
-	//		}
-	//	},
-	//	getValue:function(){return this.getValue(this.getIndex.apply(this,arguments))},
-	//	getType:function(uri,localName){}
-	//	getType:function(i){},
-};
-
-function _set_proto_(thiz, parent) {
-	thiz.__proto__ = parent;
-	return thiz;
-}
-if (!(_set_proto_({}, _set_proto_.prototype) instanceof _set_proto_)) {
-	_set_proto_ = function _set_proto_(thiz, parent) {
-		function p() {};
-		p.prototype = parent;
-		p = new p();
-		for (parent in thiz) {
-			p[parent] = thiz[parent];
-		}
-		return p;
-	};
-}
-
-function split(source, start) {
-	var match;
-	var buf = [];
-	var reg = /'[^']+'|"[^"]+"|[^\s<>\/=]+=?|(\/?\s*>|<)/g;
-	reg.lastIndex = start;
-	reg.exec(source); //skip <
-	while (match = reg.exec(source)) {
-		buf.push(match);
-		if (match[1]) return buf;
-	}
-}
-
-exports.XMLReader = XMLReader;
-
-/***/ }),
-/* 10 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _typeof2 = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
-
-var _typeof = typeof Symbol === "function" && _typeof2(Symbol.iterator) === "symbol" ? function (obj) {
-	return typeof obj === "undefined" ? "undefined" : _typeof2(obj);
-} : function (obj) {
-	return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj === "undefined" ? "undefined" : _typeof2(obj);
-};
-
-var _createClass = function () {
-	function defineProperties(target, props) {
-		for (var i = 0; i < props.length; i++) {
-			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
-		}
-	}return function (Constructor, protoProps, staticProps) {
-		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
-	};
-}();
-
-function _classCallCheck(instance, Constructor) {
-	if (!(instance instanceof Constructor)) {
-		throw new TypeError("Cannot call a class as a function");
-	}
-}
-
-var _require = __webpack_require__(0),
-    wordToUtf8 = _require.wordToUtf8,
-    convertSpaces = _require.convertSpaces,
-    defaults = _require.defaults;
-
-var createScope = __webpack_require__(11);
-var xmlMatcher = __webpack_require__(5);
-
-var _require2 = __webpack_require__(1),
-    throwMultiError = _require2.throwMultiError,
-    throwContentMustBeString = _require2.throwContentMustBeString;
-
-var Lexer = __webpack_require__(12);
-var Parser = __webpack_require__(13);
-
-var _require3 = __webpack_require__(14),
-    _render = _require3.render;
-
-function _getFullText(content, tagsXmlArray) {
-	var matcher = xmlMatcher(content, tagsXmlArray);
-	var result = matcher.matches.map(function (match) {
-		return match.array[2];
-	});
-	return wordToUtf8(convertSpaces(result.join("")));
-}
-
-module.exports = function () {
-	function XmlTemplater(content, options) {
-		_classCallCheck(this, XmlTemplater);
-
-		this.fromJson(options);
-		this.setModules({ inspect: { filePath: this.filePath } });
-		this.load(content);
-	}
-
-	_createClass(XmlTemplater, [{
-		key: "load",
-		value: function load(content) {
-			if (typeof content !== "string") {
-				throwContentMustBeString(typeof content === "undefined" ? "undefined" : _typeof(content));
-			}
-			this.content = content;
-		}
-	}, {
-		key: "setTags",
-		value: function setTags(tags) {
-			this.tags = tags != null ? tags : {};
-			this.scopeManager = createScope({ tags: this.tags, parser: this.parser });
-			return this;
-		}
-	}, {
-		key: "fromJson",
-		value: function fromJson(options) {
-			this.filePath = options.filePath;
-			this.modules = options.modules;
-			this.fileTypeConfig = options.fileTypeConfig;
-			Object.keys(defaults).map(function (key) {
-				this[key] = options[key] != null ? options[key] : defaults[key];
-			}, this);
-		}
-	}, {
-		key: "getFullText",
-		value: function getFullText() {
-			return _getFullText(this.content, this.fileTypeConfig.tagsXmlTextArray);
-		}
-	}, {
-		key: "setModules",
-		value: function setModules(obj) {
-			this.modules.forEach(function (module) {
-				module.set(obj);
-			});
-		}
-	}, {
-		key: "parse",
-		value: function parse() {
-			var allErrors = [];
-			this.xmllexed = Lexer.xmlparse(this.content, {
-				text: this.fileTypeConfig.tagsXmlTextArray,
-				other: this.fileTypeConfig.tagsXmlLexedArray
-			});
-			this.setModules({ inspect: { xmllexed: this.xmllexed } });
-
-			var _Lexer$parse = Lexer.parse(this.xmllexed, this.delimiters),
-			    lexed = _Lexer$parse.lexed,
-			    lexerErrors = _Lexer$parse.errors;
-
-			allErrors = allErrors.concat(lexerErrors);
-			this.lexed = lexed;
-			this.setModules({ inspect: { lexed: this.lexed } });
-			this.parsed = Parser.parse(this.lexed, this.modules);
-			this.setModules({ inspect: { parsed: this.parsed } });
-
-			var _Parser$postparse = Parser.postparse(this.parsed, this.modules),
-			    postparsed = _Parser$postparse.postparsed,
-			    postparsedErrors = _Parser$postparse.errors;
-
-			this.postparsed = postparsed;
-			this.setModules({ inspect: { postparsed: this.postparsed } });
-			allErrors = allErrors.concat(postparsedErrors);
-			this.errorChecker(allErrors);
-			return this;
-		}
-	}, {
-		key: "errorChecker",
-		value: function errorChecker(errors) {
-			var _this = this;
-
-			if (errors.length) {
-				this.modules.forEach(function (module) {
-					errors = module.errorsTransformer(errors);
-				});
-				errors.forEach(function (error) {
-					error.properties.file = _this.filePath;
-				});
-				throwMultiError(errors);
-			}
-		}
-		/*
-  content is the whole content to be tagged
-  scope is the current scope
-  returns the new content of the tagged content
-  */
-
-	}, {
-		key: "render",
-		value: function render(to) {
-			this.filePath = to;
-			var options = {
-				compiled: this.postparsed,
-				tags: this.tags,
-				modules: this.modules,
-				parser: this.parser,
-				nullGetter: this.nullGetter,
-				filePath: this.filePath,
-				render: _render
-			};
-			options.scopeManager = createScope(options);
-
-			var _render2 = _render(options),
-			    errors = _render2.errors,
-			    parts = _render2.parts;
-
-			this.errorChecker(errors);
-			this.content = parts.join("");
-			this.setModules({ inspect: { content: this.content } });
-			return this;
-		}
-	}]);
-
-	return XmlTemplater;
-}();
-
-/***/ }),
-/* 11 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _createClass = function () {
-	function defineProperties(target, props) {
-		for (var i = 0; i < props.length; i++) {
-			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
-		}
-	}return function (Constructor, protoProps, staticProps) {
-		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
-	};
-}();
-
-function _classCallCheck(instance, Constructor) {
-	if (!(instance instanceof Constructor)) {
-		throw new TypeError("Cannot call a class as a function");
-	}
-}
-
-var _require = __webpack_require__(1),
-    XTScopeParserError = _require.XTScopeParserError;
-
-// This class responsibility is to manage the scope
-
-
-var ScopeManager = function () {
-	function ScopeManager(options) {
-		_classCallCheck(this, ScopeManager);
-
-		this.scopePath = options.scopePath;
-		this.scopeList = options.scopeList;
-		this.parser = options.parser;
-	}
-
-	_createClass(ScopeManager, [{
-		key: "loopOver",
-		value: function loopOver(tag, callback, inverted) {
-			inverted = inverted || false;
-			return this.loopOverValue(this.getValue(tag), callback, inverted);
-		}
-	}, {
-		key: "functorIfInverted",
-		value: function functorIfInverted(inverted, functor, value) {
-			if (inverted) {
-				functor(value);
-			}
-		}
-	}, {
-		key: "isValueFalsy",
-		value: function isValueFalsy(value, type) {
-			return value == null || !value || type === "[object Array]" && value.length === 0;
-		}
-	}, {
-		key: "loopOverValue",
-		value: function loopOverValue(value, functor, inverted) {
-			var type = Object.prototype.toString.call(value);
-			var currentValue = this.scopeList[this.num];
-			if (this.isValueFalsy(value, type)) {
-				return this.functorIfInverted(inverted, functor, currentValue);
-			}
-			if (type === "[object Array]") {
-				for (var i = 0, scope; i < value.length; i++) {
-					scope = value[i];
-					this.functorIfInverted(!inverted, functor, scope);
-				}
-				return;
-			}
-			if (type === "[object Object]") {
-				return this.functorIfInverted(!inverted, functor, value);
-			}
-			return this.functorIfInverted(!inverted, functor, currentValue);
-		}
-	}, {
-		key: "getValue",
-		value: function getValue(tag, num) {
-			// search in the scopes (in reverse order) and keep the first defined value
-			this.num = num == null ? this.scopeList.length - 1 : num;
-			var err = void 0;
-			var result = void 0;
-			var scope = this.scopeList[this.num];
-			var parser = this.parser(tag, { scopePath: this.scopePath });
-			try {
-				result = parser.get(scope, { num: this.num, scopeList: this.scopeList });
-			} catch (error) {
-				err = new XTScopeParserError("Scope parser execution failed");
-				err.properties = {
-					id: "scopeparser_execution_failed",
-					explanation: "The scope parser for the tag " + tag + " failed to execute",
-					scope: scope,
-					tag: tag,
-					rootError: error
-				};
-				throw err;
-			}
-			if (result == null && this.num > 0) {
-				return this.getValue(tag, this.num - 1);
-			}
-			return result;
-		}
-	}, {
-		key: "createSubScopeManager",
-		value: function createSubScopeManager(scope, tag) {
-			return new ScopeManager({
-				parser: this.parser,
-				scopeList: this.scopeList.concat(scope),
-				scopePath: this.scopePath.concat(tag)
-			});
-		}
-	}]);
-
-	return ScopeManager;
-}();
-
-module.exports = function (options) {
-	options.scopePath = [];
-	options.scopeList = [options.tags];
-	return new ScopeManager(options);
-};
-
-/***/ }),
-/* 12 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _require = __webpack_require__(1),
-    getUnclosedTagException = _require.getUnclosedTagException,
-    getUnopenedTagException = _require.getUnopenedTagException,
-    throwMalformedXml = _require.throwMalformedXml;
-
-var _require2 = __webpack_require__(0),
-    concatArrays = _require2.concatArrays,
-    isTextStart = _require2.isTextStart,
-    isTextEnd = _require2.isTextEnd;
-
-function inRange(range, match) {
-	return range[0] <= match.offset && match.offset < range[1];
-}
-
-function updateInTextTag(part, inTextTag) {
-	if (isTextStart(part)) {
-		if (inTextTag) {
-			throwMalformedXml(part);
-		}
-		return true;
-	}
-	if (isTextEnd(part)) {
-		if (!inTextTag) {
-			throwMalformedXml(part);
-		}
-		return false;
-	}
-	return inTextTag;
-}
-
-function offsetSort(a, b) {
-	return a.offset - b.offset;
-}
-
-function getTag(tag) {
-	var position = "start";
-	var start = 1;
-	if (tag[tag.length - 2] === "/") {
-		position = "selfclosing";
-	}
-	if (tag[1] === "/") {
-		start = 2;
-		position = "end";
-	}
-	var index = tag.indexOf(" ");
-	var end = index === -1 ? tag.length - 1 : index;
-	return {
-		tag: tag.slice(start, end),
-		position: position
-	};
-}
-
-function tagMatcher(content, textMatchArray, othersMatchArray) {
-	var cursor = 0;
-	var contentLength = content.length;
-	var allMatches = concatArrays([textMatchArray.map(function (tag) {
-		return { tag: tag, text: true };
-	}), othersMatchArray.map(function (tag) {
-		return { tag: tag, text: false };
-	})]).reduce(function (allMatches, t) {
-		allMatches[t.tag] = t.text;
-		return allMatches;
-	}, {});
-	var totalMatches = [];
-
-	while (cursor < contentLength) {
-		cursor = content.indexOf("<", cursor);
-		if (cursor === -1) {
-			break;
-		}
-		var offset = cursor;
-		cursor = content.indexOf(">", cursor);
-		var tagText = content.slice(offset, cursor + 1);
-
-		var _getTag = getTag(tagText),
-		    tag = _getTag.tag,
-		    position = _getTag.position;
-
-		var text = allMatches[tag];
-		if (text == null) {
-			continue;
-		}
-		totalMatches.push({
-			type: "tag",
-			position: position,
-			text: text,
-			offset: offset,
-			value: tagText,
-			tag: tag
-		});
-	}
-
-	return totalMatches;
-}
-
-function getDelimiterErrors(delimiterMatches, fullText, ranges) {
-	if (delimiterMatches.length === 0) {
-		return [];
-	}
-	var errors = [];
-	var inDelimiter = false;
-	var lastDelimiterMatch = { offset: 0 };
-	var xtag = void 0;
-	var rangeIndex = 0;
-	delimiterMatches.forEach(function (delimiterMatch) {
-		while (ranges[rangeIndex + 1]) {
-			if (ranges[rangeIndex + 1].offset > delimiterMatch.offset) {
-				break;
-			}
-			rangeIndex++;
-		}
-		xtag = fullText.substr(lastDelimiterMatch.offset, delimiterMatch.offset - lastDelimiterMatch.offset);
-		if (delimiterMatch.position === "start" && inDelimiter || delimiterMatch.position === "end" && !inDelimiter) {
-			if (delimiterMatch.position === "start") {
-				errors.push(getUnclosedTagException({ xtag: xtag, offset: lastDelimiterMatch.offset }));
-				delimiterMatch.error = true;
-			} else {
-				errors.push(getUnopenedTagException({ xtag: xtag, offset: delimiterMatch.offset }));
-				delimiterMatch.error = true;
-			}
-		} else {
-			inDelimiter = !inDelimiter;
-		}
-		lastDelimiterMatch = delimiterMatch;
-	});
-	var delimiterMatch = { offset: fullText.length };
-	xtag = fullText.substr(lastDelimiterMatch.offset, delimiterMatch.offset - lastDelimiterMatch.offset);
-	if (inDelimiter) {
-		errors.push(getUnclosedTagException({ xtag: xtag, offset: lastDelimiterMatch.offset }));
-		delimiterMatch.error = true;
-	}
-	return errors;
-}
-
-function getAllIndexes(arr, val, position) {
-	var indexes = [];
-	var offset = -1;
-	do {
-		offset = arr.indexOf(val, offset + 1);
-		if (offset !== -1) {
-			indexes.push({ offset: offset, position: position });
-		}
-	} while (offset !== -1);
-	return indexes;
-}
-
-function Reader(innerContentParts) {
-	var _this = this;
-
-	this.innerContentParts = innerContentParts;
-	this.full = "";
-	this.parseDelimiters = function (delimiters) {
-		_this.full = _this.innerContentParts.map(function (p) {
-			return p.value;
-		}).join("");
-		var delimiterMatches = concatArrays([getAllIndexes(_this.full, delimiters.start, "start"), getAllIndexes(_this.full, delimiters.end, "end")]).sort(offsetSort);
-
-		var offset = 0;
-		var ranges = _this.innerContentParts.map(function (part) {
-			offset += part.value.length;
-			return { offset: offset - part.value.length, lIndex: part.lIndex };
-		});
-
-		var errors = getDelimiterErrors(delimiterMatches, _this.full, ranges);
-		var delimiterLength = {
-			start: delimiters.start.length,
-			end: delimiters.end.length
-		};
-		var cutNext = 0;
-		var delimiterIndex = 0;
-
-		_this.parsed = ranges.map(function (p, i) {
-			var offset = p.offset;
-
-			var range = [offset, offset + this.innerContentParts[i].value.length];
-			var partContent = this.innerContentParts[i].value;
-			var delimitersInOffset = [];
-			while (delimiterIndex < delimiterMatches.length && inRange(range, delimiterMatches[delimiterIndex])) {
-				delimitersInOffset.push(delimiterMatches[delimiterIndex]);
-				delimiterIndex++;
-			}
-			var parts = [];
-			var cursor = 0;
-			if (cutNext > 0) {
-				cursor = cutNext;
-				cutNext = 0;
-			}
-			delimitersInOffset.forEach(function (delimiterInOffset) {
-				var value = partContent.substr(cursor, delimiterInOffset.offset - offset - cursor);
-				if (value.length > 0) {
-					parts.push({ type: "content", value: value, offset: cursor + offset });
-					cursor += value.length;
-				}
-				var delimiterPart = {
-					type: "delimiter",
-					position: delimiterInOffset.position,
-					offset: cursor + offset
-				};
-				if (delimiterInOffset.error) {
-					delimiterPart.error = delimiterInOffset.error;
-				}
-				parts.push(delimiterPart);
-				cursor = delimiterInOffset.offset - offset + delimiterLength[delimiterInOffset.position];
-			});
-			cutNext = cursor - partContent.length;
-			var value = partContent.substr(cursor);
-			if (value.length > 0) {
-				parts.push({ type: "content", value: value, offset: offset });
-			}
-			return parts;
-		}, _this);
-		_this.errors = errors;
-	};
-}
-
-module.exports = {
-	parse: function parse(xmlparsed, delimiters) {
-		var inTextTag = false;
-		var innerContentParts = [];
-		xmlparsed.forEach(function (part) {
-			inTextTag = updateInTextTag(part, inTextTag);
-			if (inTextTag && part.type === "content") {
-				innerContentParts.push(part);
-			}
-		});
-		var reader = new Reader(innerContentParts);
-		reader.parseDelimiters(delimiters);
-
-		var lexed = [];
-		var index = 0;
-		xmlparsed.forEach(function (part) {
-			inTextTag = updateInTextTag(part, inTextTag);
-			if (part.type === "content") {
-				part.position = inTextTag ? "insidetag" : "outsidetag";
-			}
-			if (inTextTag && part.type === "content") {
-				Array.prototype.push.apply(lexed, reader.parsed[index].map(function (p) {
-					if (p.type === "content") {
-						p.position = "insidetag";
-					}
-					return p;
-				}));
-				index++;
-			} else {
-				lexed.push(part);
-			}
-		});
-		return { errors: reader.errors, lexed: lexed };
-	},
-	xmlparse: function xmlparse(content, xmltags) {
-		var matches = tagMatcher(content, xmltags.text, xmltags.other);
-		var cursor = 0;
-		var parsed = matches.reduce(function (parsed, match) {
-			var value = content.substr(cursor, match.offset - cursor);
-			if (value.length > 0) {
-				parsed.push({ type: "content", value: value });
-			}
-			cursor = match.offset + match.value.length;
-			delete match.offset;
-			if (match.value.length > 0) {
-				parsed.push(match);
-			}
-			return parsed;
-		}, []).map(function (p, i) {
-			p.lIndex = i;
-			return p;
-		});
-		var value = content.substr(cursor);
-		if (value.length > 0) {
-			parsed.push({ type: "content", value: value });
-		}
-		return parsed;
-	}
-};
-
-/***/ }),
-/* 13 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _extends = Object.assign || function (target) {
-	for (var i = 1; i < arguments.length; i++) {
-		var source = arguments[i];for (var key in source) {
-			if (Object.prototype.hasOwnProperty.call(source, key)) {
-				target[key] = source[key];
-			}
-		}
-	}return target;
-};
-
-var _require = __webpack_require__(0),
-    wordToUtf8 = _require.wordToUtf8,
-    concatArrays = _require.concatArrays;
-
-function moduleParse(modules, placeHolderContent, parsed, startOffset) {
-	var moduleParsed = void 0;
-	for (var i = 0, l = modules.length; i < l; i++) {
-		var _module = modules[i];
-		moduleParsed = _module.parse(placeHolderContent);
-		if (moduleParsed) {
-			moduleParsed.offset = startOffset;
-			parsed.push(moduleParsed);
-			return parsed;
-		}
-	}
-	parsed.push({
-		type: "placeholder",
-		value: placeHolderContent,
-		offset: startOffset
-	});
-	return parsed;
-}
-
-var parser = {
-	postparse: function postparse(postparsed, modules) {
-		function getTraits(traitName, postparsed) {
-			return modules.map(function (module) {
-				return module.getTraits(traitName, postparsed);
-			});
-		}
-		var errors = [];
-		function postparse(postparsed, options) {
-			return modules.reduce(function (postparsed, module) {
-				var r = module.postparse(postparsed, _extends({}, options, {
-					postparse: postparse,
-					getTraits: getTraits
-				}));
-				if (r.errors) {
-					errors = concatArrays([errors, r.errors]);
-					return r.postparsed;
-				}
-				return r;
-			}, postparsed);
-		}
-		return { postparsed: postparse(postparsed), errors: errors };
-	},
-	parse: function parse(lexed, modules) {
-		var inPlaceHolder = false;
-		var placeHolderContent = "";
-		var startOffset = void 0;
-		var tailParts = [];
-		return lexed.reduce(function lexedToParsed(parsed, token) {
-			if (token.type === "delimiter") {
-				inPlaceHolder = token.position === "start";
-				if (token.position === "end") {
-					placeHolderContent = wordToUtf8(placeHolderContent);
-					parsed = moduleParse(modules, placeHolderContent, parsed, startOffset);
-					startOffset = null;
-					Array.prototype.push.apply(parsed, tailParts);
-					tailParts = [];
-				}
-				if (token.position === "start") {
-					tailParts = [];
-					startOffset = token.offset;
-				}
-				placeHolderContent = "";
-				return parsed;
-			}
-			if (!inPlaceHolder) {
-				parsed.push(token);
-				return parsed;
-			}
-			if (token.type !== "content" || token.position !== "insidetag") {
-				tailParts.push(token);
-				return parsed;
-			}
-			placeHolderContent += token.value;
-			return parsed;
-		}, []);
-	}
-};
-
-module.exports = parser;
-
-/***/ }),
 /* 14 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _require = __webpack_require__(0),
-    utf8ToWord = _require.utf8ToWord,
-    concatArrays = _require.concatArrays,
-    hasCorruptCharacters = _require.hasCorruptCharacters;
-
-var _require2 = __webpack_require__(1),
-    throwUnimplementedTagType = _require2.throwUnimplementedTagType,
-    throwCorruptCharacters = _require2.throwCorruptCharacters;
-
-function moduleRender(part, options) {
-	var moduleRendered = void 0;
-	for (var i = 0, l = options.modules.length; i < l; i++) {
-		var _module = options.modules[i];
-		moduleRendered = _module.render(part, options);
-		if (moduleRendered) {
-			return moduleRendered;
-		}
-	}
-	return false;
-}
-
-function render(options) {
-	var compiled = options.compiled,
-	    scopeManager = options.scopeManager,
-	    nullGetter = options.nullGetter;
-
-	var errors = [];
-	var parts = compiled.map(function (part) {
-		var moduleRendered = moduleRender(part, options);
-		if (moduleRendered) {
-			if (moduleRendered.errors) {
-				errors = concatArrays([errors, moduleRendered.errors]);
-			}
-			return moduleRendered.value;
-		}
-		if (part.type === "placeholder") {
-			var value = scopeManager.getValue(part.value);
-			if (value == null) {
-				value = nullGetter(part);
-			}
-			if (hasCorruptCharacters(value)) {
-				throwCorruptCharacters({ tag: part.value, value: value });
-			}
-			return utf8ToWord(value);
-		}
-		if (part.type === "content" || part.type === "tag") {
-			return part.value;
-		}
-		throwUnimplementedTagType(part);
-	});
-	return { errors: errors, parts: parts };
-}
-
-module.exports = { render: render };
-
-/***/ }),
-/* 15 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var loopModule = __webpack_require__(16);
-var spacePreserveModule = __webpack_require__(17);
-var rawXmlModule = __webpack_require__(18);
-var expandPairTrait = __webpack_require__(19);
-var render = __webpack_require__(21);
-
-var PptXFileTypeConfig = {
-	getTemplatedFiles: function getTemplatedFiles(zip) {
-		var slideTemplates = zip.file(/ppt\/(slides|slideMasters)\/(slide|slideMaster)\d+\.xml/).map(function (file) {
-			return file.name;
-		});
-		return slideTemplates.concat(["ppt/presentation.xml", "docProps/app.xml", "docProps/core.xml"]);
-	},
-	textPath: function textPath() {
-		return "ppt/slides/slide1.xml";
-	},
-
-	tagsXmlTextArray: ["a:t", "m:t", "vt:lpstr", "dc:title", "dc:creator", "cp:keywords"],
-	tagsXmlLexedArray: ["p:sp", "a:tc", "a:tr", "a:table", "a:p", "a:r"],
-	expandTags: [{ contains: "a:tc", expand: "a:tr" }],
-	onParagraphLoop: [{ contains: "a:p", expand: "a:p", onlyTextInTag: true }],
-	tagRawXml: "p:sp",
-	tagTextXml: "a:t",
-	baseModules: [loopModule, expandPairTrait, rawXmlModule, render]
-};
-
-var DocXFileTypeConfig = {
-	getTemplatedFiles: function getTemplatedFiles(zip) {
-		var baseTags = ["docProps/core.xml", "docProps/app.xml", "word/document.xml", "word/document2.xml"];
-		var slideTemplates = zip.file(/word\/(header|footer)\d+\.xml/).map(function (file) {
-			return file.name;
-		});
-		return slideTemplates.concat(baseTags);
-	},
-	textPath: function textPath(zip) {
-		if (zip.files["word/document.xml"]) {
-			return "word/document.xml";
-		}
-		if (zip.files["word/document2.xml"]) {
-			return "word/document2.xml";
-		}
-	},
-
-	tagsXmlTextArray: ["w:t", "m:t", "vt:lpstr", "dc:title", "dc:creator", "cp:keywords"],
-	tagsXmlLexedArray: ["w:tc", "w:tr", "w:table", "w:p", "w:r", "w:rPr", "w:pPr", "w:spacing"],
-	expandTags: [{ contains: "w:tc", expand: "w:tr" }],
-	onParagraphLoop: [{ contains: "w:p", expand: "w:p", onlyTextInTag: true }],
-	tagRawXml: "w:p",
-	tagTextXml: "w:t",
-	baseModules: [loopModule, spacePreserveModule, expandPairTrait, rawXmlModule, render]
-};
-
-module.exports = {
-	docx: DocXFileTypeConfig,
-	pptx: PptXFileTypeConfig
-};
-
-/***/ }),
-/* 16 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _require = __webpack_require__(0),
-    mergeObjects = _require.mergeObjects,
-    chunkBy = _require.chunkBy,
-    last = _require.last,
-    isParagraphStart = _require.isParagraphStart,
-    isParagraphEnd = _require.isParagraphEnd,
-    isContent = _require.isContent;
-
-var dashInnerRegex = /^-([^\s]+)\s(.+)$/;
-var wrapper = __webpack_require__(2);
-
-var moduleName = "loop";
-
-function hasContent(parts) {
-	return parts.some(function (part) {
-		return isContent(part);
-	});
-}
-
-function isEnclosedByParagraphs(parsed) {
-	if (parsed.length === 0) {
-		return false;
-	}
-	return isParagraphStart(parsed[0]) && isParagraphEnd(last(parsed));
-}
-
-function getOffset(chunk) {
-	return hasContent(chunk) ? 0 : chunk.length;
-}
-
-var loopModule = {
-	name: "LoopModule",
-	prefix: {
-		start: "#",
-		end: "/",
-		dash: "-",
-		inverted: "^"
-	},
-	parse: function parse(placeHolderContent) {
-		var module = moduleName;
-		var type = "placeholder";
-		var prefix = this.prefix;
-		if (placeHolderContent[0] === prefix.start) {
-			return {
-				type: type,
-				value: placeHolderContent.substr(1),
-				expandTo: "auto",
-				module: module,
-				location: "start",
-				inverted: false
-			};
-		}
-		if (placeHolderContent[0] === prefix.inverted) {
-			return {
-				type: type,
-				value: placeHolderContent.substr(1),
-				expandTo: "auto",
-				module: module,
-				location: "start",
-				inverted: true
-			};
-		}
-		if (placeHolderContent[0] === prefix.end) {
-			return {
-				type: type,
-				value: placeHolderContent.substr(1),
-				module: module,
-				location: "end"
-			};
-		}
-		if (placeHolderContent[0] === prefix.dash) {
-			var value = placeHolderContent.replace(dashInnerRegex, "$2");
-			var expandTo = placeHolderContent.replace(dashInnerRegex, "$1");
-			return {
-				type: type,
-				value: value,
-				expandTo: expandTo,
-				module: module,
-				location: "start",
-				inverted: false
-			};
-		}
-		return null;
-	},
-	getTraits: function getTraits(traitName, parsed) {
-		if (traitName !== "expandPair") {
-			return;
-		}
-
-		return parsed.reduce(function (tags, part, offset) {
-			if (part.type === "placeholder" && part.module === moduleName) {
-				tags.push({ part: part, offset: offset });
-			}
-			return tags;
-		}, []);
-	},
-	postparse: function postparse(parsed, _ref) {
-		var basePart = _ref.basePart;
-
-		if (!isEnclosedByParagraphs(parsed)) {
-			return parsed;
-		}
-		if (!basePart || basePart.expandTo !== "auto") {
-			return parsed;
-		}
-		var chunks = chunkBy(parsed, function (p) {
-			if (isParagraphStart(p)) {
-				return "start";
-			}
-			if (isParagraphEnd(p)) {
-				return "end";
-			}
-			return null;
-		});
-		if (chunks.length <= 2) {
-			return parsed;
-		}
-		var firstChunk = chunks[0];
-		var lastChunk = last(chunks);
-		var firstOffset = getOffset(firstChunk);
-		var lastOffset = getOffset(lastChunk);
-		if (firstOffset === 0 || lastOffset === 0) {
-			return parsed;
-		}
-		var result = parsed.slice(firstOffset, parsed.length - lastOffset);
-		return result;
-	},
-	render: function render(part, options) {
-		if (!part.type === "placeholder" || part.module !== moduleName) {
-			return null;
-		}
-		var totalValue = [];
-		var errors = [];
-		function loopOver(scope) {
-			var scopeManager = options.scopeManager.createSubScopeManager(scope, part.value);
-			var subRendered = options.render(mergeObjects({}, options, {
-				compiled: part.subparsed,
-				tags: {},
-				scopeManager: scopeManager
-			}));
-			totalValue = totalValue.concat(subRendered.parts);
-			errors = errors.concat(subRendered.errors || []);
-		}
-		options.scopeManager.loopOver(part.value, loopOver, part.inverted);
-		return { value: totalValue.join(""), errors: errors };
-	}
-};
-
-module.exports = function () {
-	return wrapper(loopModule);
-};
-
-/***/ }),
-/* 17 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var wrapper = __webpack_require__(2);
-
-var _require = __webpack_require__(0),
-    isTextStart = _require.isTextStart,
-    isTextEnd = _require.isTextEnd;
-
-var spacePreserve = {
-	name: "SpacePreserveModule",
-	postparse: function postparse(postparsed) {
-		var chunk = [];
-		var inChunk = false;
-		var result = postparsed.reduce(function (postparsed, part) {
-			if (isTextStart(part) && part.tag === "w:t") {
-				inChunk = true;
-			}
-			if (inChunk) {
-				if (part.type === "placeholder" && !part.module) {
-					chunk[0].value = '<w:t xml:space="preserve">';
-				}
-				chunk.push(part);
-			} else {
-				postparsed.push(part);
-			}
-			if (isTextEnd(part) && part.tag === "w:t") {
-				Array.prototype.push.apply(postparsed, chunk);
-				inChunk = false;
-				chunk = [];
-			}
-			return postparsed;
-		}, []);
-		Array.prototype.push.apply(result, chunk);
-		return result;
-	}
-};
-module.exports = function () {
-	return wrapper(spacePreserve);
-};
-
-/***/ }),
-/* 18 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _createClass = function () {
-	function defineProperties(target, props) {
-		for (var i = 0; i < props.length; i++) {
-			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
-		}
-	}return function (Constructor, protoProps, staticProps) {
-		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
-	};
-}();
-
-function _classCallCheck(instance, Constructor) {
-	if (!(instance instanceof Constructor)) {
-		throw new TypeError("Cannot call a class as a function");
-	}
-}
-
-var traits = __webpack_require__(3);
-
-var _require = __webpack_require__(0),
-    isContent = _require.isContent;
-
-var _require2 = __webpack_require__(1),
-    throwRawTagShouldBeOnlyTextInParagraph = _require2.throwRawTagShouldBeOnlyTextInParagraph;
-
-var moduleName = "rawxml";
-var wrapper = __webpack_require__(2);
-
-function getInner(_ref) {
-	var part = _ref.part,
-	    left = _ref.left,
-	    right = _ref.right,
-	    postparsed = _ref.postparsed,
-	    index = _ref.index;
-
-	var paragraphParts = postparsed.slice(left + 1, right);
-	paragraphParts.forEach(function (p, i) {
-		if (i === index - left - 1) {
-			return;
-		}
-		if (isContent(p)) {
-			throwRawTagShouldBeOnlyTextInParagraph({ paragraphParts: paragraphParts, part: part });
-		}
-	});
-	return part;
-}
-
-var RawXmlModule = function () {
-	function RawXmlModule() {
-		_classCallCheck(this, RawXmlModule);
-
-		this.name = "RawXmlModule";
-		this.prefix = "@";
-	}
-
-	_createClass(RawXmlModule, [{
-		key: "optionsTransformer",
-		value: function optionsTransformer(options, docxtemplater) {
-			this.fileTypeConfig = docxtemplater.fileTypeConfig;
-			return options;
-		}
-	}, {
-		key: "parse",
-		value: function parse(placeHolderContent) {
-			var type = "placeholder";
-			if (placeHolderContent[0] !== this.prefix) {
-				return null;
-			}
-			return { type: type, value: placeHolderContent.substr(1), module: moduleName };
-		}
-	}, {
-		key: "postparse",
-		value: function postparse(postparsed) {
-			return traits.expandToOne(postparsed, { moduleName: moduleName, getInner: getInner, expandTo: this.fileTypeConfig.tagRawXml });
-		}
-	}, {
-		key: "render",
-		value: function render(part, options) {
-			if (part.module !== moduleName) {
-				return null;
-			}
-			var value = options.scopeManager.getValue(part.value);
-			if (value == null) {
-				value = options.nullGetter(part);
-			}
-			return { value: value };
-		}
-	}]);
-
-	return RawXmlModule;
-}();
-
-module.exports = function () {
-	return wrapper(new RawXmlModule());
-};
-
-/***/ }),
-/* 19 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _slicedToArray = function () {
-	function sliceIterator(arr, i) {
-		var _arr = [];var _n = true;var _d = false;var _e = undefined;try {
-			for (var _i = arr[Symbol.iterator](), _s; !(_n = (_s = _i.next()).done); _n = true) {
-				_arr.push(_s.value);if (i && _arr.length === i) break;
-			}
-		} catch (err) {
-			_d = true;_e = err;
-		} finally {
-			try {
-				if (!_n && _i["return"]) _i["return"]();
-			} finally {
-				if (_d) throw _e;
-			}
-		}return _arr;
-	}return function (arr, i) {
-		if (Array.isArray(arr)) {
-			return arr;
-		} else if (Symbol.iterator in Object(arr)) {
-			return sliceIterator(arr, i);
-		} else {
-			throw new TypeError("Invalid attempt to destructure non-iterable instance");
-		}
-	};
-}();
-
-var traitName = "expandPair";
-var mergeSort = __webpack_require__(20);
-
-var _require = __webpack_require__(0),
-    getLeft = _require.getLeft,
-    getRight = _require.getRight;
-
-var wrapper = __webpack_require__(2);
-
-var _require2 = __webpack_require__(3),
-    getExpandToDefault = _require2.getExpandToDefault;
-
-var _require3 = __webpack_require__(1),
-    getUnmatchedLoopException = _require3.getUnmatchedLoopException,
-    getClosingTagNotMatchOpeningTag = _require3.getClosingTagNotMatchOpeningTag,
-    throwLocationInvalid = _require3.throwLocationInvalid;
-
-function getOpenCountChange(part) {
-	switch (part.location) {
-		case "start":
-			return 1;
-		case "end":
-			return -1;
-		default:
-			throwLocationInvalid(part);
-	}
-}
-
-function getPairs(traits) {
-	var errors = [];
-	var pairs = [];
-	if (traits.length === 0) {
-		return { pairs: pairs, errors: errors };
-	}
-	var countOpen = 1;
-
-	var _traits = _slicedToArray(traits, 1),
-	    firstTrait = _traits[0];
-
-	if (firstTrait.part.location === "start") {
-		for (var i = 1; i < traits.length; i++) {
-			var currentTrait = traits[i];
-			countOpen += getOpenCountChange(currentTrait.part);
-			if (countOpen === 0) {
-				var _outer = getPairs(traits.slice(i + 1));
-				if (currentTrait.part.value !== firstTrait.part.value && currentTrait.part.value !== "") {
-					errors.push(getClosingTagNotMatchOpeningTag({ tags: [firstTrait.part, currentTrait.part] }));
-				} else {
-					pairs = [[firstTrait, currentTrait]];
-				}
-				return { pairs: pairs.concat(_outer.pairs), errors: errors.concat(_outer.errors) };
-			}
-		}
-	}
-	var part = firstTrait.part;
-
-	errors.push(getUnmatchedLoopException({ part: part, location: part.location }));
-	var outer = getPairs(traits.slice(1));
-	return { pairs: outer.pairs, errors: errors.concat(outer.errors) };
-}
-
-var expandPairTrait = {
-	name: "ExpandPairTrait",
-	optionsTransformer: function optionsTransformer(options, docxtemplater) {
-		this.expandTags = docxtemplater.fileTypeConfig.expandTags.concat(docxtemplater.options.paragraphLoop ? docxtemplater.fileTypeConfig.onParagraphLoop : []);
-		return options;
-	},
-	postparse: function postparse(postparsed, _ref) {
-		var _this = this;
-
-		var getTraits = _ref.getTraits,
-		    _postparse = _ref.postparse;
-
-		var traits = getTraits(traitName, postparsed);
-		traits = traits.map(function (trait) {
-			return trait || [];
-		});
-		traits = mergeSort(traits);
-
-		var _getPairs = getPairs(traits),
-		    pairs = _getPairs.pairs,
-		    errors = _getPairs.errors;
-
-		var expandedPairs = pairs.map(function (pair) {
-			var expandTo = pair[0].part.expandTo;
-
-			if (expandTo === "auto") {
-				var result = getExpandToDefault(postparsed, pair, _this.expandTags);
-				if (result.error) {
-					errors.push(result.error);
-				}
-				expandTo = result.value;
-			}
-			if (!expandTo) {
-				return [pair[0].offset, pair[1].offset];
-			}
-			var left = getLeft(postparsed, expandTo, pair[0].offset);
-			var right = getRight(postparsed, expandTo, pair[1].offset);
-			return [left, right];
-		});
-
-		var currentPairIndex = 0;
-		var innerParts = void 0;
-		var newParsed = postparsed.reduce(function (newParsed, part, i) {
-			var inPair = currentPairIndex < pairs.length && expandedPairs[currentPairIndex][0] <= i;
-			var pair = pairs[currentPairIndex];
-			var expandedPair = expandedPairs[currentPairIndex];
-			if (!inPair) {
-				newParsed.push(part);
-				return newParsed;
-			}
-			if (expandedPair[0] === i) {
-				innerParts = [];
-			}
-			if (pair[0].offset !== i && pair[1].offset !== i) {
-				innerParts.push(part);
-			}
-			if (expandedPair[1] === i) {
-				var basePart = postparsed[pair[0].offset];
-				basePart.subparsed = _postparse(innerParts, { basePart: basePart });
-				delete basePart.location;
-				delete basePart.expandTo;
-				newParsed.push(basePart);
-				currentPairIndex++;
-			}
-			return newParsed;
-		}, []);
-		return { postparsed: newParsed, errors: errors };
-	}
-};
-
-module.exports = function () {
-	return wrapper(expandPairTrait);
-};
-
-/***/ }),
-/* 20 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-function getMinFromArrays(arrays, state) {
-	var minIndex = -1;
-	for (var i = 0, l = arrays.length; i < l; i++) {
-		if (state[i] >= arrays[i].length) {
-			continue;
-		}
-		if (minIndex === -1 || arrays[i][state[i]].offset < arrays[minIndex][state[minIndex]].offset) {
-			minIndex = i;
-		}
-	}
-	if (minIndex === -1) {
-		throw new Error("minIndex negative");
-	}
-	return minIndex;
-}
-
-module.exports = function (arrays) {
-	var totalLength = arrays.reduce(function (sum, array) {
-		return sum + array.length;
-	}, 0);
-	arrays = arrays.filter(function (array) {
-		return array.length > 0;
-	});
-
-	var resultArray = new Array(totalLength);
-
-	var state = arrays.map(function () {
-		return 0;
-	});
-
-	var i = 0;
-
-	while (i <= totalLength - 1) {
-		var arrayIndex = getMinFromArrays(arrays, state);
-		resultArray[i] = arrays[arrayIndex][state[arrayIndex]];
-		state[arrayIndex]++;
-		i++;
-	}
-
-	return resultArray;
-};
-
-/***/ }),
-/* 21 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _createClass = function () {
-	function defineProperties(target, props) {
-		for (var i = 0; i < props.length; i++) {
-			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
-		}
-	}return function (Constructor, protoProps, staticProps) {
-		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
-	};
-}();
-
-function _classCallCheck(instance, Constructor) {
-	if (!(instance instanceof Constructor)) {
-		throw new TypeError("Cannot call a class as a function");
-	}
-}
-
-var wrapper = __webpack_require__(2);
-
-var _require = __webpack_require__(1),
-    getScopeCompilationError = _require.getScopeCompilationError;
-
-var Render = function () {
-	function Render() {
-		_classCallCheck(this, Render);
-
-		this.name = "Render";
-	}
-
-	_createClass(Render, [{
-		key: "set",
-		value: function set(obj) {
-			if (obj.compiled) {
-				this.compiled = obj.compiled;
-			}
-			if (obj.data != null) {
-				this.data = obj.data;
-			}
-		}
-	}, {
-		key: "getRenderedMap",
-		value: function getRenderedMap(mapper) {
-			var _this = this;
-
-			return Object.keys(this.compiled).reduce(function (mapper, from) {
-				mapper[from] = { from: from, data: _this.data };
-				return mapper;
-			}, mapper);
-		}
-	}, {
-		key: "optionsTransformer",
-		value: function optionsTransformer(options, docxtemplater) {
-			this.parser = docxtemplater.parser;
-			return options;
-		}
-	}, {
-		key: "postparse",
-		value: function postparse(postparsed) {
-			var _this2 = this;
-
-			var errors = [];
-			postparsed.forEach(function (p) {
-				if (p.type === "placeholder") {
-					var tag = p.value;
-					try {
-						_this2.parser(tag);
-					} catch (rootError) {
-						errors.push(getScopeCompilationError({ tag: tag, rootError: rootError }));
-					}
-				}
-			});
-			return { postparsed: postparsed, errors: errors };
-		}
-	}]);
-
-	return Render;
-}();
-
-module.exports = function () {
-	return wrapper(new Render());
-};
-
-/***/ }),
-/* 22 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var support = __webpack_require__(24);
-var compressions = __webpack_require__(27);
-var nodeBuffer = __webpack_require__(29);
-/**
- * Convert a string to a "binary string" : a string containing only char codes between 0 and 255.
- * @param {string} str the string to transform.
- * @return {String} the binary string.
- */
-exports.string2binary = function (str) {
-    var result = "";
-    for (var i = 0; i < str.length; i++) {
-        result += String.fromCharCode(str.charCodeAt(i) & 0xff);
-    }
-    return result;
-};
-exports.arrayBuffer2Blob = function (buffer, mimeType) {
-    exports.checkSupport("blob");
-    mimeType = mimeType || 'application/zip';
-
-    try {
-        // Blob constructor
-        return new Blob([buffer], {
-            type: mimeType
-        });
-    } catch (e) {
-
-        try {
-            // deprecated, browser only, old way
-            var Builder = window.BlobBuilder || window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder;
-            var builder = new Builder();
-            builder.append(buffer);
-            return builder.getBlob(mimeType);
-        } catch (e) {
-
-            // well, fuck ?!
-            throw new Error("Bug : can't construct the Blob.");
-        }
-    }
-};
-/**
- * The identity function.
- * @param {Object} input the input.
- * @return {Object} the same input.
- */
-function identity(input) {
-    return input;
-}
-
-/**
- * Fill in an array with a string.
- * @param {String} str the string to use.
- * @param {Array|ArrayBuffer|Uint8Array|Buffer} array the array to fill in (will be mutated).
- * @return {Array|ArrayBuffer|Uint8Array|Buffer} the updated array.
- */
-function stringToArrayLike(str, array) {
-    for (var i = 0; i < str.length; ++i) {
-        array[i] = str.charCodeAt(i) & 0xFF;
-    }
-    return array;
-}
-
-/**
- * Transform an array-like object to a string.
- * @param {Array|ArrayBuffer|Uint8Array|Buffer} array the array to transform.
- * @return {String} the result.
- */
-function arrayLikeToString(array) {
-    // Performances notes :
-    // --------------------
-    // String.fromCharCode.apply(null, array) is the fastest, see
-    // see http://jsperf.com/converting-a-uint8array-to-a-string/2
-    // but the stack is limited (and we can get huge arrays !).
-    //
-    // result += String.fromCharCode(array[i]); generate too many strings !
-    //
-    // This code is inspired by http://jsperf.com/arraybuffer-to-string-apply-performance/2
-    var chunk = 65536;
-    var result = [],
-        len = array.length,
-        type = exports.getTypeOf(array),
-        k = 0,
-        canUseApply = true;
-    try {
-        switch (type) {
-            case "uint8array":
-                String.fromCharCode.apply(null, new Uint8Array(0));
-                break;
-            case "nodebuffer":
-                String.fromCharCode.apply(null, nodeBuffer(0));
-                break;
-        }
-    } catch (e) {
-        canUseApply = false;
-    }
-
-    // no apply : slow and painful algorithm
-    // default browser on android 4.*
-    if (!canUseApply) {
-        var resultStr = "";
-        for (var i = 0; i < array.length; i++) {
-            resultStr += String.fromCharCode(array[i]);
-        }
-        return resultStr;
-    }
-    while (k < len && chunk > 1) {
-        try {
-            if (type === "array" || type === "nodebuffer") {
-                result.push(String.fromCharCode.apply(null, array.slice(k, Math.min(k + chunk, len))));
-            } else {
-                result.push(String.fromCharCode.apply(null, array.subarray(k, Math.min(k + chunk, len))));
-            }
-            k += chunk;
-        } catch (e) {
-            chunk = Math.floor(chunk / 2);
-        }
-    }
-    return result.join("");
-}
-
-exports.applyFromCharCode = arrayLikeToString;
-
-/**
- * Copy the data from an array-like to an other array-like.
- * @param {Array|ArrayBuffer|Uint8Array|Buffer} arrayFrom the origin array.
- * @param {Array|ArrayBuffer|Uint8Array|Buffer} arrayTo the destination array which will be mutated.
- * @return {Array|ArrayBuffer|Uint8Array|Buffer} the updated destination array.
- */
-function arrayLikeToArrayLike(arrayFrom, arrayTo) {
-    for (var i = 0; i < arrayFrom.length; i++) {
-        arrayTo[i] = arrayFrom[i];
-    }
-    return arrayTo;
-}
-
-// a matrix containing functions to transform everything into everything.
-var transform = {};
-
-// string to ?
-transform["string"] = {
-    "string": identity,
-    "array": function array(input) {
-        return stringToArrayLike(input, new Array(input.length));
-    },
-    "arraybuffer": function arraybuffer(input) {
-        return transform["string"]["uint8array"](input).buffer;
-    },
-    "uint8array": function uint8array(input) {
-        return stringToArrayLike(input, new Uint8Array(input.length));
-    },
-    "nodebuffer": function nodebuffer(input) {
-        return stringToArrayLike(input, nodeBuffer(input.length));
-    }
-};
-
-// array to ?
-transform["array"] = {
-    "string": arrayLikeToString,
-    "array": identity,
-    "arraybuffer": function arraybuffer(input) {
-        return new Uint8Array(input).buffer;
-    },
-    "uint8array": function uint8array(input) {
-        return new Uint8Array(input);
-    },
-    "nodebuffer": function nodebuffer(input) {
-        return nodeBuffer(input);
-    }
-};
-
-// arraybuffer to ?
-transform["arraybuffer"] = {
-    "string": function string(input) {
-        return arrayLikeToString(new Uint8Array(input));
-    },
-    "array": function array(input) {
-        return arrayLikeToArrayLike(new Uint8Array(input), new Array(input.byteLength));
-    },
-    "arraybuffer": identity,
-    "uint8array": function uint8array(input) {
-        return new Uint8Array(input);
-    },
-    "nodebuffer": function nodebuffer(input) {
-        return nodeBuffer(new Uint8Array(input));
-    }
-};
-
-// uint8array to ?
-transform["uint8array"] = {
-    "string": arrayLikeToString,
-    "array": function array(input) {
-        return arrayLikeToArrayLike(input, new Array(input.length));
-    },
-    "arraybuffer": function arraybuffer(input) {
-        return input.buffer;
-    },
-    "uint8array": identity,
-    "nodebuffer": function nodebuffer(input) {
-        return nodeBuffer(input);
-    }
-};
-
-// nodebuffer to ?
-transform["nodebuffer"] = {
-    "string": arrayLikeToString,
-    "array": function array(input) {
-        return arrayLikeToArrayLike(input, new Array(input.length));
-    },
-    "arraybuffer": function arraybuffer(input) {
-        return transform["nodebuffer"]["uint8array"](input).buffer;
-    },
-    "uint8array": function uint8array(input) {
-        return arrayLikeToArrayLike(input, new Uint8Array(input.length));
-    },
-    "nodebuffer": identity
-};
-
-/**
- * Transform an input into any type.
- * The supported output type are : string, array, uint8array, arraybuffer, nodebuffer.
- * If no output type is specified, the unmodified input will be returned.
- * @param {String} outputType the output type.
- * @param {String|Array|ArrayBuffer|Uint8Array|Buffer} input the input to convert.
- * @throws {Error} an Error if the browser doesn't support the requested output type.
- */
-exports.transformTo = function (outputType, input) {
-    if (!input) {
-        // undefined, null, etc
-        // an empty string won't harm.
-        input = "";
-    }
-    if (!outputType) {
-        return input;
-    }
-    exports.checkSupport(outputType);
-    var inputType = exports.getTypeOf(input);
-    var result = transform[inputType][outputType](input);
-    return result;
-};
-
-/**
- * Return the type of the input.
- * The type will be in a format valid for JSZip.utils.transformTo : string, array, uint8array, arraybuffer.
- * @param {Object} input the input to identify.
- * @return {String} the (lowercase) type of the input.
- */
-exports.getTypeOf = function (input) {
-    if (typeof input === "string") {
-        return "string";
-    }
-    if (Object.prototype.toString.call(input) === "[object Array]") {
-        return "array";
-    }
-    if (support.nodebuffer && nodeBuffer.test(input)) {
-        return "nodebuffer";
-    }
-    if (support.uint8array && input instanceof Uint8Array) {
-        return "uint8array";
-    }
-    if (support.arraybuffer && input instanceof ArrayBuffer) {
-        return "arraybuffer";
-    }
-};
-
-/**
- * Throw an exception if the type is not supported.
- * @param {String} type the type to check.
- * @throws {Error} an Error if the browser doesn't support the requested type.
- */
-exports.checkSupport = function (type) {
-    var supported = support[type.toLowerCase()];
-    if (!supported) {
-        throw new Error(type + " is not supported by this browser");
-    }
-};
-exports.MAX_VALUE_16BITS = 65535;
-exports.MAX_VALUE_32BITS = -1; // well, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF" is parsed as -1
-
-/**
- * Prettify a string read as binary.
- * @param {string} str the string to prettify.
- * @return {string} a pretty string.
- */
-exports.pretty = function (str) {
-    var res = '',
-        code,
-        i;
-    for (i = 0; i < (str || "").length; i++) {
-        code = str.charCodeAt(i);
-        res += '\\x' + (code < 16 ? "0" : "") + code.toString(16).toUpperCase();
-    }
-    return res;
-};
-
-/**
- * Find a compression registered in JSZip.
- * @param {string} compressionMethod the method magic to find.
- * @return {Object|null} the JSZip compression object, null if none found.
- */
-exports.findCompression = function (compressionMethod) {
-    for (var method in compressions) {
-        if (!compressions.hasOwnProperty(method)) {
-            continue;
-        }
-        if (compressions[method].magic === compressionMethod) {
-            return compressions[method];
-        }
-    }
-    return null;
-};
-/**
-* Cross-window, cross-Node-context regular expression detection
-* @param  {Object}  object Anything
-* @return {Boolean}        true if the object is a regular expression,
-* false otherwise
-*/
-exports.isRegExp = function (object) {
-    return Object.prototype.toString.call(object) === "[object RegExp]";
-};
-
-/**
- * Merge the objects passed as parameters into a new one.
- * @private
- * @param {...Object} var_args All objects to merge.
- * @return {Object} a new object with the data of the others.
- */
-exports.extend = function () {
-    var result = {},
-        i,
-        attr;
-    for (i = 0; i < arguments.length; i++) {
-        // arguments is not enumerable in some browsers
-        for (attr in arguments[i]) {
-            if (arguments[i].hasOwnProperty(attr) && typeof result[attr] === "undefined") {
-                result[attr] = arguments[i][attr];
-            }
-        }
-    }
-    return result;
-};
-
-/***/ }),
-/* 23 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
-
-var TYPED_OK = typeof Uint8Array !== 'undefined' && typeof Uint16Array !== 'undefined' && typeof Int32Array !== 'undefined';
-
-function _has(obj, key) {
-  return Object.prototype.hasOwnProperty.call(obj, key);
-}
-
-exports.assign = function (obj /*from1, from2, from3, ...*/) {
-  var sources = Array.prototype.slice.call(arguments, 1);
-  while (sources.length) {
-    var source = sources.shift();
-    if (!source) {
-      continue;
-    }
-
-    if ((typeof source === 'undefined' ? 'undefined' : _typeof(source)) !== 'object') {
-      throw new TypeError(source + 'must be non-object');
-    }
-
-    for (var p in source) {
-      if (_has(source, p)) {
-        obj[p] = source[p];
-      }
-    }
-  }
-
-  return obj;
-};
-
-// reduce buffer size, avoiding mem copy
-exports.shrinkBuf = function (buf, size) {
-  if (buf.length === size) {
-    return buf;
-  }
-  if (buf.subarray) {
-    return buf.subarray(0, size);
-  }
-  buf.length = size;
-  return buf;
-};
-
-var fnTyped = {
-  arraySet: function arraySet(dest, src, src_offs, len, dest_offs) {
-    if (src.subarray && dest.subarray) {
-      dest.set(src.subarray(src_offs, src_offs + len), dest_offs);
-      return;
-    }
-    // Fallback to ordinary array
-    for (var i = 0; i < len; i++) {
-      dest[dest_offs + i] = src[src_offs + i];
-    }
-  },
-  // Join array of chunks to single array.
-  flattenChunks: function flattenChunks(chunks) {
-    var i, l, len, pos, chunk, result;
-
-    // calculate data length
-    len = 0;
-    for (i = 0, l = chunks.length; i < l; i++) {
-      len += chunks[i].length;
-    }
-
-    // join chunks
-    result = new Uint8Array(len);
-    pos = 0;
-    for (i = 0, l = chunks.length; i < l; i++) {
-      chunk = chunks[i];
-      result.set(chunk, pos);
-      pos += chunk.length;
-    }
-
-    return result;
-  }
-};
-
-var fnUntyped = {
-  arraySet: function arraySet(dest, src, src_offs, len, dest_offs) {
-    for (var i = 0; i < len; i++) {
-      dest[dest_offs + i] = src[src_offs + i];
-    }
-  },
-  // Join array of chunks to single array.
-  flattenChunks: function flattenChunks(chunks) {
-    return [].concat.apply([], chunks);
-  }
-};
-
-// Enable/Disable typed arrays use, for testing
-//
-exports.setTyped = function (on) {
-  if (on) {
-    exports.Buf8 = Uint8Array;
-    exports.Buf16 = Uint16Array;
-    exports.Buf32 = Int32Array;
-    exports.assign(exports, fnTyped);
-  } else {
-    exports.Buf8 = Array;
-    exports.Buf16 = Array;
-    exports.Buf32 = Array;
-    exports.assign(exports, fnUntyped);
-  }
-};
-
-exports.setTyped(TYPED_OK);
-
-/***/ }),
-/* 24 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-/* WEBPACK VAR INJECTION */(function(Buffer) {
-
-exports.base64 = true;
-exports.array = true;
-exports.string = true;
-exports.arraybuffer = typeof ArrayBuffer !== "undefined" && typeof Uint8Array !== "undefined";
-// contains true if JSZip can read/generate nodejs Buffer, false otherwise.
-// Browserify will provide a Buffer implementation for browsers, which is
-// an augmented Uint8Array (i.e., can be used as either Buffer or U8).
-exports.nodebuffer = typeof Buffer !== "undefined";
-// contains true if JSZip can read/generate Uint8Array, false otherwise.
-exports.uint8array = typeof Uint8Array !== "undefined";
-
-if (typeof ArrayBuffer === "undefined") {
-    exports.blob = false;
-} else {
-    var buffer = new ArrayBuffer(0);
-    try {
-        exports.blob = new Blob([buffer], {
-            type: "application/zip"
-        }).size === 0;
-    } catch (e) {
-        try {
-            var Builder = window.BlobBuilder || window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder;
-            var builder = new Builder();
-            builder.append(buffer);
-            exports.blob = builder.getBlob('application/zip').size === 0;
-        } catch (e) {
-            exports.blob = false;
-        }
-    }
-}
-/* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(30).Buffer))
-
-/***/ }),
-/* 25 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-// private property
-
-var _keyStr = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
-
-// public method for encoding
-exports.encode = function (input, utf8) {
-    var output = "";
-    var chr1, chr2, chr3, enc1, enc2, enc3, enc4;
-    var i = 0;
-
-    while (i < input.length) {
-
-        chr1 = input.charCodeAt(i++);
-        chr2 = input.charCodeAt(i++);
-        chr3 = input.charCodeAt(i++);
-
-        enc1 = chr1 >> 2;
-        enc2 = (chr1 & 3) << 4 | chr2 >> 4;
-        enc3 = (chr2 & 15) << 2 | chr3 >> 6;
-        enc4 = chr3 & 63;
-
-        if (isNaN(chr2)) {
-            enc3 = enc4 = 64;
-        } else if (isNaN(chr3)) {
-            enc4 = 64;
-        }
-
-        output = output + _keyStr.charAt(enc1) + _keyStr.charAt(enc2) + _keyStr.charAt(enc3) + _keyStr.charAt(enc4);
-    }
-
-    return output;
-};
-
-// public method for decoding
-exports.decode = function (input, utf8) {
-    var output = "";
-    var chr1, chr2, chr3;
-    var enc1, enc2, enc3, enc4;
-    var i = 0;
-
-    input = input.replace(/[^A-Za-z0-9\+\/\=]/g, "");
-
-    while (i < input.length) {
-
-        enc1 = _keyStr.indexOf(input.charAt(i++));
-        enc2 = _keyStr.indexOf(input.charAt(i++));
-        enc3 = _keyStr.indexOf(input.charAt(i++));
-        enc4 = _keyStr.indexOf(input.charAt(i++));
-
-        chr1 = enc1 << 2 | enc2 >> 4;
-        chr2 = (enc2 & 15) << 4 | enc3 >> 2;
-        chr3 = (enc3 & 3) << 6 | enc4;
-
-        output = output + String.fromCharCode(chr1);
-
-        if (enc3 != 64) {
-            output = output + String.fromCharCode(chr2);
-        }
-        if (enc4 != 64) {
-            output = output + String.fromCharCode(chr3);
-        }
-    }
-
-    return output;
-};
-
-/***/ }),
-/* 26 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-var support = __webpack_require__(24);
-var utils = __webpack_require__(22);
-var _crc = __webpack_require__(59);
-var signature = __webpack_require__(36);
-var defaults = __webpack_require__(37);
-var base64 = __webpack_require__(25);
-var compressions = __webpack_require__(27);
-var CompressedObject = __webpack_require__(38);
-var nodeBuffer = __webpack_require__(29);
-var utf8 = __webpack_require__(39);
-var StringWriter = __webpack_require__(60);
-var Uint8ArrayWriter = __webpack_require__(61);
-
-/**
- * Returns the raw data of a ZipObject, decompress the content if necessary.
- * @param {ZipObject} file the file to use.
- * @return {String|ArrayBuffer|Uint8Array|Buffer} the data.
- */
-var getRawData = function getRawData(file) {
-    if (file._data instanceof CompressedObject) {
-        file._data = file._data.getContent();
-        file.options.binary = true;
-        file.options.base64 = false;
-
-        if (utils.getTypeOf(file._data) === "uint8array") {
-            var copy = file._data;
-            // when reading an arraybuffer, the CompressedObject mechanism will keep it and subarray() a Uint8Array.
-            // if we request a file in the same format, we might get the same Uint8Array or its ArrayBuffer (the original zip file).
-            file._data = new Uint8Array(copy.length);
-            // with an empty Uint8Array, Opera fails with a "Offset larger than array size"
-            if (copy.length !== 0) {
-                file._data.set(copy, 0);
-            }
-        }
-    }
-    return file._data;
-};
-
-/**
- * Returns the data of a ZipObject in a binary form. If the content is an unicode string, encode it.
- * @param {ZipObject} file the file to use.
- * @return {String|ArrayBuffer|Uint8Array|Buffer} the data.
- */
-var getBinaryData = function getBinaryData(file) {
-    var result = getRawData(file),
-        type = utils.getTypeOf(result);
-    if (type === "string") {
-        if (!file.options.binary) {
-            // unicode text !
-            // unicode string => binary string is a painful process, check if we can avoid it.
-            if (support.nodebuffer) {
-                return nodeBuffer(result, "utf-8");
-            }
-        }
-        return file.asBinary();
-    }
-    return result;
-};
-
-/**
- * Transform this._data into a string.
- * @param {function} filter a function String -> String, applied if not null on the result.
- * @return {String} the string representing this._data.
- */
-var dataToString = function dataToString(asUTF8) {
-    var result = getRawData(this);
-    if (result === null || typeof result === "undefined") {
-        return "";
-    }
-    // if the data is a base64 string, we decode it before checking the encoding !
-    if (this.options.base64) {
-        result = base64.decode(result);
-    }
-    if (asUTF8 && this.options.binary) {
-        // JSZip.prototype.utf8decode supports arrays as input
-        // skip to array => string step, utf8decode will do it.
-        result = out.utf8decode(result);
-    } else {
-        // no utf8 transformation, do the array => string step.
-        result = utils.transformTo("string", result);
-    }
-
-    if (!asUTF8 && !this.options.binary) {
-        result = utils.transformTo("string", out.utf8encode(result));
-    }
-    return result;
-};
-/**
- * A simple object representing a file in the zip file.
- * @constructor
- * @param {string} name the name of the file
- * @param {String|ArrayBuffer|Uint8Array|Buffer} data the data
- * @param {Object} options the options of the file
- */
-var ZipObject = function ZipObject(name, data, options) {
-    this.name = name;
-    this.dir = options.dir;
-    this.date = options.date;
-    this.comment = options.comment;
-    this.unixPermissions = options.unixPermissions;
-    this.dosPermissions = options.dosPermissions;
-
-    this._data = data;
-    this.options = options;
-
-    /*
-     * This object contains initial values for dir and date.
-     * With them, we can check if the user changed the deprecated metadata in
-     * `ZipObject#options` or not.
-     */
-    this._initialMetadata = {
-        dir: options.dir,
-        date: options.date
-    };
-};
-
-ZipObject.prototype = {
-    /**
-     * Return the content as UTF8 string.
-     * @return {string} the UTF8 string.
-     */
-    asText: function asText() {
-        return dataToString.call(this, true);
-    },
-    /**
-     * Returns the binary content.
-     * @return {string} the content as binary.
-     */
-    asBinary: function asBinary() {
-        return dataToString.call(this, false);
-    },
-    /**
-     * Returns the content as a nodejs Buffer.
-     * @return {Buffer} the content as a Buffer.
-     */
-    asNodeBuffer: function asNodeBuffer() {
-        var result = getBinaryData(this);
-        return utils.transformTo("nodebuffer", result);
-    },
-    /**
-     * Returns the content as an Uint8Array.
-     * @return {Uint8Array} the content as an Uint8Array.
-     */
-    asUint8Array: function asUint8Array() {
-        var result = getBinaryData(this);
-        return utils.transformTo("uint8array", result);
-    },
-    /**
-     * Returns the content as an ArrayBuffer.
-     * @return {ArrayBuffer} the content as an ArrayBufer.
-     */
-    asArrayBuffer: function asArrayBuffer() {
-        return this.asUint8Array().buffer;
-    }
-};
-
-/**
- * Transform an integer into a string in hexadecimal.
- * @private
- * @param {number} dec the number to convert.
- * @param {number} bytes the number of bytes to generate.
- * @returns {string} the result.
- */
-var decToHex = function decToHex(dec, bytes) {
-    var hex = "",
-        i;
-    for (i = 0; i < bytes; i++) {
-        hex += String.fromCharCode(dec & 0xff);
-        dec = dec >>> 8;
-    }
-    return hex;
-};
-
-/**
- * Transforms the (incomplete) options from the user into the complete
- * set of options to create a file.
- * @private
- * @param {Object} o the options from the user.
- * @return {Object} the complete set of options.
- */
-var prepareFileAttrs = function prepareFileAttrs(o) {
-    o = o || {};
-    if (o.base64 === true && (o.binary === null || o.binary === undefined)) {
-        o.binary = true;
-    }
-    o = utils.extend(o, defaults);
-    o.date = o.date || new Date();
-    if (o.compression !== null) o.compression = o.compression.toUpperCase();
-
-    return o;
-};
-
-/**
- * Add a file in the current folder.
- * @private
- * @param {string} name the name of the file
- * @param {String|ArrayBuffer|Uint8Array|Buffer} data the data of the file
- * @param {Object} o the options of the file
- * @return {Object} the new file.
- */
-var fileAdd = function fileAdd(name, data, o) {
-    // be sure sub folders exist
-    var dataType = utils.getTypeOf(data),
-        parent;
-
-    o = prepareFileAttrs(o);
-
-    if (typeof o.unixPermissions === "string") {
-        o.unixPermissions = parseInt(o.unixPermissions, 8);
-    }
-
-    // UNX_IFDIR  0040000 see zipinfo.c
-    if (o.unixPermissions && o.unixPermissions & 0x4000) {
-        o.dir = true;
-    }
-    // Bit 4    Directory
-    if (o.dosPermissions && o.dosPermissions & 0x0010) {
-        o.dir = true;
-    }
-
-    if (o.dir) {
-        name = forceTrailingSlash(name);
-    }
-
-    if (o.createFolders && (parent = parentFolder(name))) {
-        folderAdd.call(this, parent, true);
-    }
-
-    if (o.dir || data === null || typeof data === "undefined") {
-        o.base64 = false;
-        o.binary = false;
-        data = null;
-        dataType = null;
-    } else if (dataType === "string") {
-        if (o.binary && !o.base64) {
-            // optimizedBinaryString == true means that the file has already been filtered with a 0xFF mask
-            if (o.optimizedBinaryString !== true) {
-                // this is a string, not in a base64 format.
-                // Be sure that this is a correct "binary string"
-                data = utils.string2binary(data);
-            }
-        }
-    } else {
-        // arraybuffer, uint8array, ...
-        o.base64 = false;
-        o.binary = true;
-
-        if (!dataType && !(data instanceof CompressedObject)) {
-            throw new Error("The data of '" + name + "' is in an unsupported format !");
-        }
-
-        // special case : it's way easier to work with Uint8Array than with ArrayBuffer
-        if (dataType === "arraybuffer") {
-            data = utils.transformTo("uint8array", data);
-        }
-    }
-
-    var object = new ZipObject(name, data, o);
-    this.files[name] = object;
-    return object;
-};
-
-/**
- * Find the parent folder of the path.
- * @private
- * @param {string} path the path to use
- * @return {string} the parent folder, or ""
- */
-var parentFolder = function parentFolder(path) {
-    if (path.slice(-1) == '/') {
-        path = path.substring(0, path.length - 1);
-    }
-    var lastSlash = path.lastIndexOf('/');
-    return lastSlash > 0 ? path.substring(0, lastSlash) : "";
-};
-
-/**
- * Returns the path with a slash at the end.
- * @private
- * @param {String} path the path to check.
- * @return {String} the path with a trailing slash.
- */
-var forceTrailingSlash = function forceTrailingSlash(path) {
-    // Check the name ends with a /
-    if (path.slice(-1) != "/") {
-        path += "/"; // IE doesn't like substr(-1)
-    }
-    return path;
-};
-/**
- * Add a (sub) folder in the current folder.
- * @private
- * @param {string} name the folder's name
- * @param {boolean=} [createFolders] If true, automatically create sub
- *  folders. Defaults to false.
- * @return {Object} the new folder.
- */
-var folderAdd = function folderAdd(name, createFolders) {
-    createFolders = typeof createFolders !== 'undefined' ? createFolders : false;
-
-    name = forceTrailingSlash(name);
-
-    // Does this folder already exist?
-    if (!this.files[name]) {
-        fileAdd.call(this, name, null, {
-            dir: true,
-            createFolders: createFolders
-        });
-    }
-    return this.files[name];
-};
-
-/**
- * Generate a JSZip.CompressedObject for a given zipOject.
- * @param {ZipObject} file the object to read.
- * @param {JSZip.compression} compression the compression to use.
- * @param {Object} compressionOptions the options to use when compressing.
- * @return {JSZip.CompressedObject} the compressed result.
- */
-var generateCompressedObjectFrom = function generateCompressedObjectFrom(file, compression, compressionOptions) {
-    var result = new CompressedObject(),
-        content;
-
-    // the data has not been decompressed, we might reuse things !
-    if (file._data instanceof CompressedObject) {
-        result.uncompressedSize = file._data.uncompressedSize;
-        result.crc32 = file._data.crc32;
-
-        if (result.uncompressedSize === 0 || file.dir) {
-            compression = compressions['STORE'];
-            result.compressedContent = "";
-            result.crc32 = 0;
-        } else if (file._data.compressionMethod === compression.magic) {
-            result.compressedContent = file._data.getCompressedContent();
-        } else {
-            content = file._data.getContent();
-            // need to decompress / recompress
-            result.compressedContent = compression.compress(utils.transformTo(compression.compressInputType, content), compressionOptions);
-        }
-    } else {
-        // have uncompressed data
-        content = getBinaryData(file);
-        if (!content || content.length === 0 || file.dir) {
-            compression = compressions['STORE'];
-            content = "";
-        }
-        result.uncompressedSize = content.length;
-        result.crc32 = _crc(content);
-        result.compressedContent = compression.compress(utils.transformTo(compression.compressInputType, content), compressionOptions);
-    }
-
-    result.compressedSize = result.compressedContent.length;
-    result.compressionMethod = compression.magic;
-
-    return result;
-};
-
-/**
- * Generate the UNIX part of the external file attributes.
- * @param {Object} unixPermissions the unix permissions or null.
- * @param {Boolean} isDir true if the entry is a directory, false otherwise.
- * @return {Number} a 32 bit integer.
- *
- * adapted from http://unix.stackexchange.com/questions/14705/the-zip-formats-external-file-attribute :
- *
- * TTTTsstrwxrwxrwx0000000000ADVSHR
- * ^^^^____________________________ file type, see zipinfo.c (UNX_*)
- *     ^^^_________________________ setuid, setgid, sticky
- *        ^^^^^^^^^________________ permissions
- *                 ^^^^^^^^^^______ not used ?
- *                           ^^^^^^ DOS attribute bits : Archive, Directory, Volume label, System file, Hidden, Read only
- */
-var generateUnixExternalFileAttr = function generateUnixExternalFileAttr(unixPermissions, isDir) {
-
-    var result = unixPermissions;
-    if (!unixPermissions) {
-        // I can't use octal values in strict mode, hence the hexa.
-        //  040775 => 0x41fd
-        // 0100664 => 0x81b4
-        result = isDir ? 0x41fd : 0x81b4;
-    }
-
-    return (result & 0xFFFF) << 16;
-};
-
-/**
- * Generate the DOS part of the external file attributes.
- * @param {Object} dosPermissions the dos permissions or null.
- * @param {Boolean} isDir true if the entry is a directory, false otherwise.
- * @return {Number} a 32 bit integer.
- *
- * Bit 0     Read-Only
- * Bit 1     Hidden
- * Bit 2     System
- * Bit 3     Volume Label
- * Bit 4     Directory
- * Bit 5     Archive
- */
-var generateDosExternalFileAttr = function generateDosExternalFileAttr(dosPermissions, isDir) {
-
-    // the dir flag is already set for compatibility
-
-    return (dosPermissions || 0) & 0x3F;
-};
-
-/**
- * Generate the various parts used in the construction of the final zip file.
- * @param {string} name the file name.
- * @param {ZipObject} file the file content.
- * @param {JSZip.CompressedObject} compressedObject the compressed object.
- * @param {number} offset the current offset from the start of the zip file.
- * @param {String} platform let's pretend we are this platform (change platform dependents fields)
- * @param {Function} encodeFileName the function to encode the file name / comment.
- * @return {object} the zip parts.
- */
-var generateZipParts = function generateZipParts(name, file, compressedObject, offset, platform, encodeFileName) {
-    var data = compressedObject.compressedContent,
-        useCustomEncoding = encodeFileName !== utf8.utf8encode,
-        encodedFileName = utils.transformTo("string", encodeFileName(file.name)),
-        utfEncodedFileName = utils.transformTo("string", utf8.utf8encode(file.name)),
-        comment = file.comment || "",
-        encodedComment = utils.transformTo("string", encodeFileName(comment)),
-        utfEncodedComment = utils.transformTo("string", utf8.utf8encode(comment)),
-        useUTF8ForFileName = utfEncodedFileName.length !== file.name.length,
-        useUTF8ForComment = utfEncodedComment.length !== comment.length,
-        o = file.options,
-        dosTime,
-        dosDate,
-        extraFields = "",
-        unicodePathExtraField = "",
-        unicodeCommentExtraField = "",
-        dir,
-        date;
-
-    // handle the deprecated options.dir
-    if (file._initialMetadata.dir !== file.dir) {
-        dir = file.dir;
-    } else {
-        dir = o.dir;
-    }
-
-    // handle the deprecated options.date
-    if (file._initialMetadata.date !== file.date) {
-        date = file.date;
-    } else {
-        date = o.date;
-    }
-
-    var extFileAttr = 0;
-    var versionMadeBy = 0;
-    if (dir) {
-        // dos or unix, we set the dos dir flag
-        extFileAttr |= 0x00010;
-    }
-    if (platform === "UNIX") {
-        versionMadeBy = 0x031E; // UNIX, version 3.0
-        extFileAttr |= generateUnixExternalFileAttr(file.unixPermissions, dir);
-    } else {
-        // DOS or other, fallback to DOS
-        versionMadeBy = 0x0014; // DOS, version 2.0
-        extFileAttr |= generateDosExternalFileAttr(file.dosPermissions, dir);
-    }
-
-    // date
-    // @see http://www.delorie.com/djgpp/doc/rbinter/it/52/13.html
-    // @see http://www.delorie.com/djgpp/doc/rbinter/it/65/16.html
-    // @see http://www.delorie.com/djgpp/doc/rbinter/it/66/16.html
-
-    dosTime = date.getHours();
-    dosTime = dosTime << 6;
-    dosTime = dosTime | date.getMinutes();
-    dosTime = dosTime << 5;
-    dosTime = dosTime | date.getSeconds() / 2;
-
-    dosDate = date.getFullYear() - 1980;
-    dosDate = dosDate << 4;
-    dosDate = dosDate | date.getMonth() + 1;
-    dosDate = dosDate << 5;
-    dosDate = dosDate | date.getDate();
-
-    if (useUTF8ForFileName) {
-        // set the unicode path extra field. unzip needs at least one extra
-        // field to correctly handle unicode path, so using the path is as good
-        // as any other information. This could improve the situation with
-        // other archive managers too.
-        // This field is usually used without the utf8 flag, with a non
-        // unicode path in the header (winrar, winzip). This helps (a bit)
-        // with the messy Windows' default compressed folders feature but
-        // breaks on p7zip which doesn't seek the unicode path extra field.
-        // So for now, UTF-8 everywhere !
-        unicodePathExtraField =
-        // Version
-        decToHex(1, 1) +
-        // NameCRC32
-        decToHex(_crc(encodedFileName), 4) +
-        // UnicodeName
-        utfEncodedFileName;
-
-        extraFields +=
-        // Info-ZIP Unicode Path Extra Field
-        "\x75\x70" +
-        // size
-        decToHex(unicodePathExtraField.length, 2) +
-        // content
-        unicodePathExtraField;
-    }
-
-    if (useUTF8ForComment) {
-
-        unicodeCommentExtraField =
-        // Version
-        decToHex(1, 1) +
-        // CommentCRC32
-        decToHex(this.crc32(encodedComment), 4) +
-        // UnicodeName
-        utfEncodedComment;
-
-        extraFields +=
-        // Info-ZIP Unicode Path Extra Field
-        "\x75\x63" +
-        // size
-        decToHex(unicodeCommentExtraField.length, 2) +
-        // content
-        unicodeCommentExtraField;
-    }
-
-    var header = "";
-
-    // version needed to extract
-    header += "\x0A\x00";
-    // general purpose bit flag
-    // set bit 11 if utf8
-    header += !useCustomEncoding && (useUTF8ForFileName || useUTF8ForComment) ? "\x00\x08" : "\x00\x00";
-    // compression method
-    header += compressedObject.compressionMethod;
-    // last mod file time
-    header += decToHex(dosTime, 2);
-    // last mod file date
-    header += decToHex(dosDate, 2);
-    // crc-32
-    header += decToHex(compressedObject.crc32, 4);
-    // compressed size
-    header += decToHex(compressedObject.compressedSize, 4);
-    // uncompressed size
-    header += decToHex(compressedObject.uncompressedSize, 4);
-    // file name length
-    header += decToHex(encodedFileName.length, 2);
-    // extra field length
-    header += decToHex(extraFields.length, 2);
-
-    var fileRecord = signature.LOCAL_FILE_HEADER + header + encodedFileName + extraFields;
-
-    var dirRecord = signature.CENTRAL_FILE_HEADER +
-    // version made by (00: DOS)
-    decToHex(versionMadeBy, 2) +
-    // file header (common to file and central directory)
-    header +
-    // file comment length
-    decToHex(encodedComment.length, 2) +
-    // disk number start
-    "\x00\x00" +
-    // internal file attributes TODO
-    "\x00\x00" +
-    // external file attributes
-    decToHex(extFileAttr, 4) +
-    // relative offset of local header
-    decToHex(offset, 4) +
-    // file name
-    encodedFileName +
-    // extra field
-    extraFields +
-    // file comment
-    encodedComment;
-
-    return {
-        fileRecord: fileRecord,
-        dirRecord: dirRecord,
-        compressedObject: compressedObject
-    };
-};
-
-// return the actual prototype of JSZip
-var out = {
-    /**
-     * Read an existing zip and merge the data in the current JSZip object.
-     * The implementation is in jszip-load.js, don't forget to include it.
-     * @param {String|ArrayBuffer|Uint8Array|Buffer} stream  The stream to load
-     * @param {Object} options Options for loading the stream.
-     *  options.base64 : is the stream in base64 ? default : false
-     * @return {JSZip} the current JSZip object
-     */
-    load: function load(stream, options) {
-        throw new Error("Load method is not defined. Is the file jszip-load.js included ?");
-    },
-
-    /**
-     * Filter nested files/folders with the specified function.
-     * @param {Function} search the predicate to use :
-     * function (relativePath, file) {...}
-     * It takes 2 arguments : the relative path and the file.
-     * @return {Array} An array of matching elements.
-     */
-    filter: function filter(search) {
-        var result = [],
-            filename,
-            relativePath,
-            file,
-            fileClone;
-        for (filename in this.files) {
-            if (!this.files.hasOwnProperty(filename)) {
-                continue;
-            }
-            file = this.files[filename];
-            // return a new object, don't let the user mess with our internal objects :)
-            fileClone = new ZipObject(file.name, file._data, utils.extend(file.options));
-            relativePath = filename.slice(this.root.length, filename.length);
-            if (filename.slice(0, this.root.length) === this.root && // the file is in the current root
-            search(relativePath, fileClone)) {
-                // and the file matches the function
-                result.push(fileClone);
-            }
-        }
-        return result;
-    },
-
-    /**
-     * Add a file to the zip file, or search a file.
-     * @param   {string|RegExp} name The name of the file to add (if data is defined),
-     * the name of the file to find (if no data) or a regex to match files.
-     * @param   {String|ArrayBuffer|Uint8Array|Buffer} data  The file data, either raw or base64 encoded
-     * @param   {Object} o     File options
-     * @return  {JSZip|Object|Array} this JSZip object (when adding a file),
-     * a file (when searching by string) or an array of files (when searching by regex).
-     */
-    file: function file(name, data, o) {
-        if (arguments.length === 1) {
-            if (utils.isRegExp(name)) {
-                var regexp = name;
-                return this.filter(function (relativePath, file) {
-                    return !file.dir && regexp.test(relativePath);
-                });
-            } else {
-                // text
-                return this.filter(function (relativePath, file) {
-                    return !file.dir && relativePath === name;
-                })[0] || null;
-            }
-        } else {
-            // more than one argument : we have data !
-            name = this.root + name;
-            fileAdd.call(this, name, data, o);
-        }
-        return this;
-    },
-
-    /**
-     * Add a directory to the zip file, or search.
-     * @param   {String|RegExp} arg The name of the directory to add, or a regex to search folders.
-     * @return  {JSZip} an object with the new directory as the root, or an array containing matching folders.
-     */
-    folder: function folder(arg) {
-        if (!arg) {
-            return this;
-        }
-
-        if (utils.isRegExp(arg)) {
-            return this.filter(function (relativePath, file) {
-                return file.dir && arg.test(relativePath);
-            });
-        }
-
-        // else, name is a new folder
-        var name = this.root + arg;
-        var newFolder = folderAdd.call(this, name);
-
-        // Allow chaining by returning a new object with this folder as the root
-        var ret = this.clone();
-        ret.root = newFolder.name;
-        return ret;
-    },
-
-    /**
-     * Delete a file, or a directory and all sub-files, from the zip
-     * @param {string} name the name of the file to delete
-     * @return {JSZip} this JSZip object
-     */
-    remove: function remove(name) {
-        name = this.root + name;
-        var file = this.files[name];
-        if (!file) {
-            // Look for any folders
-            if (name.slice(-1) != "/") {
-                name += "/";
-            }
-            file = this.files[name];
-        }
-
-        if (file && !file.dir) {
-            // file
-            delete this.files[name];
-        } else {
-            // maybe a folder, delete recursively
-            var kids = this.filter(function (relativePath, file) {
-                return file.name.slice(0, name.length) === name;
-            });
-            for (var i = 0; i < kids.length; i++) {
-                delete this.files[kids[i].name];
-            }
-        }
-
-        return this;
-    },
-
-    /**
-     * Generate the complete zip file
-     * @param {Object} options the options to generate the zip file :
-     * - base64, (deprecated, use type instead) true to generate base64.
-     * - compression, "STORE" by default.
-     * - type, "base64" by default. Values are : string, base64, uint8array, arraybuffer, blob.
-     * @return {String|Uint8Array|ArrayBuffer|Buffer|Blob} the zip file
-     */
-    generate: function generate(options) {
-        options = utils.extend(options || {}, {
-            base64: true,
-            compression: "STORE",
-            compressionOptions: null,
-            type: "base64",
-            platform: "DOS",
-            comment: null,
-            mimeType: 'application/zip',
-            encodeFileName: utf8.utf8encode
-        });
-
-        utils.checkSupport(options.type);
-
-        // accept nodejs `process.platform`
-        if (options.platform === 'darwin' || options.platform === 'freebsd' || options.platform === 'linux' || options.platform === 'sunos') {
-            options.platform = "UNIX";
-        }
-        if (options.platform === 'win32') {
-            options.platform = "DOS";
-        }
-
-        var zipData = [],
-            localDirLength = 0,
-            centralDirLength = 0,
-            writer,
-            i,
-            encodedComment = utils.transformTo("string", options.encodeFileName(options.comment || this.comment || ""));
-
-        // first, generate all the zip parts.
-        for (var name in this.files) {
-            if (!this.files.hasOwnProperty(name)) {
-                continue;
-            }
-            var file = this.files[name];
-
-            var compressionName = file.options.compression || options.compression.toUpperCase();
-            var compression = compressions[compressionName];
-            if (!compression) {
-                throw new Error(compressionName + " is not a valid compression method !");
-            }
-            var compressionOptions = file.options.compressionOptions || options.compressionOptions || {};
-
-            var compressedObject = generateCompressedObjectFrom.call(this, file, compression, compressionOptions);
-
-            var zipPart = generateZipParts.call(this, name, file, compressedObject, localDirLength, options.platform, options.encodeFileName);
-            localDirLength += zipPart.fileRecord.length + compressedObject.compressedSize;
-            centralDirLength += zipPart.dirRecord.length;
-            zipData.push(zipPart);
-        }
-
-        var dirEnd = "";
-
-        // end of central dir signature
-        dirEnd = signature.CENTRAL_DIRECTORY_END +
-        // number of this disk
-        "\x00\x00" +
-        // number of the disk with the start of the central directory
-        "\x00\x00" +
-        // total number of entries in the central directory on this disk
-        decToHex(zipData.length, 2) +
-        // total number of entries in the central directory
-        decToHex(zipData.length, 2) +
-        // size of the central directory   4 bytes
-        decToHex(centralDirLength, 4) +
-        // offset of start of central directory with respect to the starting disk number
-        decToHex(localDirLength, 4) +
-        // .ZIP file comment length
-        decToHex(encodedComment.length, 2) +
-        // .ZIP file comment
-        encodedComment;
-
-        // we have all the parts (and the total length)
-        // time to create a writer !
-        var typeName = options.type.toLowerCase();
-        if (typeName === "uint8array" || typeName === "arraybuffer" || typeName === "blob" || typeName === "nodebuffer") {
-            writer = new Uint8ArrayWriter(localDirLength + centralDirLength + dirEnd.length);
-        } else {
-            writer = new StringWriter(localDirLength + centralDirLength + dirEnd.length);
-        }
-
-        for (i = 0; i < zipData.length; i++) {
-            writer.append(zipData[i].fileRecord);
-            writer.append(zipData[i].compressedObject.compressedContent);
-        }
-        for (i = 0; i < zipData.length; i++) {
-            writer.append(zipData[i].dirRecord);
-        }
-
-        writer.append(dirEnd);
-
-        var zip = writer.finalize();
-
-        switch (options.type.toLowerCase()) {
-            // case "zip is an Uint8Array"
-            case "uint8array":
-            case "arraybuffer":
-            case "nodebuffer":
-                return utils.transformTo(options.type.toLowerCase(), zip);
-            case "blob":
-                return utils.arrayBuffer2Blob(utils.transformTo("arraybuffer", zip), options.mimeType);
-            // case "zip is a string"
-            case "base64":
-                return options.base64 ? base64.encode(zip) : zip;
-            default:
-                // case "string" :
-                return zip;
-        }
-    },
-
-    /**
-     * @deprecated
-     * This method will be removed in a future version without replacement.
-     */
-    crc32: function crc32(input, crc) {
-        return _crc(input, crc);
-    },
-
-    /**
-     * @deprecated
-     * This method will be removed in a future version without replacement.
-     */
-    utf8encode: function utf8encode(string) {
-        return utils.transformTo("string", utf8.utf8encode(string));
-    },
-
-    /**
-     * @deprecated
-     * This method will be removed in a future version without replacement.
-     */
-    utf8decode: function utf8decode(input) {
-        return utf8.utf8decode(input);
-    }
-};
-module.exports = out;
-
-/***/ }),
-/* 27 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-exports.STORE = {
-    magic: "\x00\x00",
-    compress: function compress(content, compressionOptions) {
-        return content; // no compression
-    },
-    uncompress: function uncompress(content) {
-        return content; // no compression
-    },
-    compressInputType: null,
-    uncompressInputType: null
-};
-exports.DEFLATE = __webpack_require__(49);
-
-/***/ }),
-/* 28 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-
-
-// (C) 1995-2013 Jean-loup Gailly and Mark Adler
-// (C) 2014-2017 Vitaly Puzrin and Andrey Tupitsin
-//
-// This software is provided 'as-is', without any express or implied
-// warranty. In no event will the authors be held liable for any damages
-// arising from the use of this software.
-//
-// Permission is granted to anyone to use this software for any purpose,
-// including commercial applications, and to alter it and redistribute it
-// freely, subject to the following restrictions:
-//
-// 1. The origin of this software must not be misrepresented; you must not
-//   claim that you wrote the original software. If you use this software
-//   in a product, an acknowledgment in the product documentation would be
-//   appreciated but is not required.
-// 2. Altered source versions must be plainly marked as such, and must not be
-//   misrepresented as being the original software.
-// 3. This notice may not be removed or altered from any source distribution.
-
-module.exports = {
-  2: 'need dictionary', /* Z_NEED_DICT       2  */
-  1: 'stream end', /* Z_STREAM_END      1  */
-  0: '', /* Z_OK              0  */
-  '-1': 'file error', /* Z_ERRNO         (-1) */
-  '-2': 'stream error', /* Z_STREAM_ERROR  (-2) */
-  '-3': 'data error', /* Z_DATA_ERROR    (-3) */
-  '-4': 'insufficient memory', /* Z_MEM_ERROR     (-4) */
-  '-5': 'buffer error', /* Z_BUF_ERROR     (-5) */
-  '-6': 'incompatible version' /* Z_VERSION_ERROR (-6) */
-};
-
-/***/ }),
-/* 29 */
-/***/ (function(module, exports, __webpack_require__) {
-
-"use strict";
-/* WEBPACK VAR INJECTION */(function(Buffer) {
-
-module.exports = function (data, encoding) {
-    return new Buffer(data, encoding);
-};
-module.exports.test = function (b) {
-    return Buffer.isBuffer(b);
-};
-/* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(30).Buffer))
-
-/***/ }),
-/* 30 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -8119,7 +5428,7 @@ function isnan(val) {
 /* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(45)))
 
 /***/ }),
-/* 31 */
+/* 15 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -8175,7 +5484,7 @@ function adler32(adler, buf, len, pos) {
 module.exports = adler32;
 
 /***/ }),
-/* 32 */
+/* 16 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -8240,14 +5549,14 @@ function crc32(crc, buf, len, pos) {
 module.exports = crc32;
 
 /***/ }),
-/* 33 */
+/* 17 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 // String encode/decode helpers
 
 
-var utils = __webpack_require__(23);
+var utils = __webpack_require__(3);
 
 // Quick check if we can use fast array to bin string conversion
 //
@@ -8452,7 +5761,7 @@ exports.utf8border = function (buf, max) {
 };
 
 /***/ }),
-/* 34 */
+/* 18 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -8505,7 +5814,7 @@ function ZStream() {
 module.exports = ZStream;
 
 /***/ }),
-/* 35 */
+/* 19 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -8578,7 +5887,7 @@ module.exports = {
 };
 
 /***/ }),
-/* 36 */
+/* 20 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -8592,7 +5901,7 @@ exports.ZIP64_CENTRAL_DIRECTORY_END = "PK\x06\x06";
 exports.DATA_DESCRIPTOR = "PK\x07\x08";
 
 /***/ }),
-/* 37 */
+/* 21 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -8610,7 +5919,7 @@ exports.unixPermissions = null;
 exports.dosPermissions = null;
 
 /***/ }),
-/* 38 */
+/* 22 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -8645,15 +5954,15 @@ CompressedObject.prototype = {
 module.exports = CompressedObject;
 
 /***/ }),
-/* 39 */
+/* 23 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-var utils = __webpack_require__(22);
-var support = __webpack_require__(24);
-var nodeBuffer = __webpack_require__(29);
+var utils = __webpack_require__(2);
+var support = __webpack_require__(5);
+var nodeBuffer = __webpack_require__(11);
 
 /**
  * The following functions come from pako, from pako/lib/utils/strings
@@ -8878,14 +6187,14 @@ exports.utf8decode = function utf8decode(buf) {
 // vim: set shiftwidth=4 softtabstop=4:
 
 /***/ }),
-/* 40 */
+/* 24 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-var DataReader = __webpack_require__(41);
-var utils = __webpack_require__(22);
+var DataReader = __webpack_require__(25);
+var utils = __webpack_require__(2);
 
 function StringReader(data, optimizedBinaryString) {
     this.data = data;
@@ -8922,13 +6231,13 @@ StringReader.prototype.readData = function (size) {
 module.exports = StringReader;
 
 /***/ }),
-/* 41 */
+/* 25 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-var utils = __webpack_require__(22);
+var utils = __webpack_require__(2);
 
 function DataReader(data) {
     this.data = null; // type : see implementation
@@ -9036,13 +6345,13 @@ DataReader.prototype = {
 module.exports = DataReader;
 
 /***/ }),
-/* 42 */
+/* 26 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-var ArrayReader = __webpack_require__(43);
+var ArrayReader = __webpack_require__(27);
 
 function Uint8ArrayReader(data) {
     if (data) {
@@ -9069,13 +6378,13 @@ Uint8ArrayReader.prototype.readData = function (size) {
 module.exports = Uint8ArrayReader;
 
 /***/ }),
-/* 43 */
+/* 27 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-var DataReader = __webpack_require__(41);
+var DataReader = __webpack_require__(25);
 
 function ArrayReader(data) {
     if (data) {
@@ -9127,13 +6436,2726 @@ ArrayReader.prototype.readData = function (size) {
 module.exports = ArrayReader;
 
 /***/ }),
+/* 28 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _docxtemplater = __webpack_require__(29);
+
+var _docxtemplater2 = _interopRequireDefault(_docxtemplater);
+
+var _jszip = __webpack_require__(44);
+
+var _jszip2 = _interopRequireDefault(_jszip);
+
+var _fileSaver = __webpack_require__(67);
+
+var _fileSaver2 = _interopRequireDefault(_fileSaver);
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+var state = { templateData: {} };
+var questionSpan = document.getElementById('questions');
+var zip;
+
+function createQuestionHtml(question, index) {
+	var questionHtml = "\n\t" + question.question + ": \n\t\t<input type=\"radio\" class=\"answer\" id=\"choice1\"\n\t\t name=\"question" + index + "\" value=\"" + question.yesAnswer + "\">\n\t\t<label for=\"choice1\">" + question.yesAnswer + "</label>\n\n\t\t<input type=\"radio\" class=\"answer\" id=\"choice2\"\n\t\t name=\"question" + index + "\" value=\"" + question.noAnswer + "\">\n\t\t<label for=\"choice2\">" + question.noAnswer + "</label>\n\t\t<br>";
+
+	return questionHtml;
+}
+function handleFileSelect(evt) {
+	// Retrieve the first (and only!) File from the FileList object
+	var f = evt.target.files[0];
+	if (f) {
+		var r = new FileReader();
+		r.onload = function (e) {
+
+			console.log("Loading template");
+			var questions = readQuestionsFromDoc(e.target.result);
+			console.log(questions);
+			questionSpan.innerHTML = questions.map(function (q, index) {
+				return createQuestionHtml(q, index);
+			}).join('');
+			document.querySelectorAll('.answer').forEach(function (elem) {
+				elem.addEventListener('change', handleAnswer, false);
+			});
+
+			console.log("Loaded template");
+		};
+		r.readAsBinaryString(f);
+	} else {
+		console.log("Error reading file");
+	}
+}
+document.getElementById('files').addEventListener('change', handleFileSelect, false);
+
+function handleAnswer(evt) {
+	var radios = document.querySelectorAll("input[type=radio]");
+	radios.forEach(function (r) {
+		//console.log(r.value + " " + r.checked)
+		state.templateData[r.value] = r.checked;
+	});
+	console.log(state);
+}
+
+function handleCreateClick(evt) {
+	processDocument(zip);
+}
+document.getElementById('createDocument').addEventListener('click', handleCreateClick, false);
+function readQuestionsFromDoc(file) {
+	zip = new _jszip2.default(file);
+	var data = zip.files["word/document.xml"]._data.getContent();
+	var string = new TextDecoder("utf-8").decode(data);
+	var xml = string,
+	    xmlDoc = $.parseXML(xml),
+	    $xml = $(xmlDoc);
+	var table = $xml.find('w\\:tbl,tbl').first();
+	var rows = table.find('w\\:tr, tr');
+	var questions = [];
+	$.each(rows, function (key, row) {
+		var elems = $(row).find('w\\:t, t');
+		if (elems.length >= 3) {
+			questions.push({ question: elems[0].textContent, yesAnswer: elems[1].textContent, noAnswer: elems[2].textContent });
+		}
+	});
+
+	return questions;
+}
+
+function processDocument(zip) {
+	var doc = new _docxtemplater2.default();
+	doc.loadZip(zip).setOptions({ paragraphLoop: true });
+	doc.setData(state.templateData);
+	try {
+		// render the document (replace all occurences of {first_name} by John, {last_name} by Doe, ...)
+		doc.render();
+	} catch (error) {
+		var e = {
+			message: error.message,
+			name: error.name,
+			stack: error.stack,
+			properties: error.properties
+		};
+		console.log(JSON.stringify({ error: e }));
+		// The error thrown here contains additional information when logged with JSON.stringify (it contains a property object).
+		throw error;
+	}
+	var out = doc.getZip().generate({
+		type: "blob",
+		mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	}); //Output the document using Data-URI
+	_fileSaver2.default.saveAs(out, "output.docx");
+}
+
+/***/ }),
+/* 29 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _createClass = function () {
+	function defineProperties(target, props) {
+		for (var i = 0; i < props.length; i++) {
+			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
+		}
+	}return function (Constructor, protoProps, staticProps) {
+		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
+	};
+}();
+
+function _classCallCheck(instance, Constructor) {
+	if (!(instance instanceof Constructor)) {
+		throw new TypeError("Cannot call a class as a function");
+	}
+}
+
+var DocUtils = __webpack_require__(0);
+DocUtils.traits = __webpack_require__(6);
+DocUtils.moduleWrapper = __webpack_require__(4);
+var defaults = DocUtils.defaults,
+    str2xml = DocUtils.str2xml,
+    xml2str = DocUtils.xml2str,
+    moduleWrapper = DocUtils.moduleWrapper,
+    concatArrays = DocUtils.concatArrays,
+    unique = DocUtils.unique;
+
+var _require = __webpack_require__(1),
+    XTInternalError = _require.XTInternalError,
+    throwFileTypeNotIdentified = _require.throwFileTypeNotIdentified,
+    throwFileTypeNotHandled = _require.throwFileTypeNotHandled;
+
+var Docxtemplater = function () {
+	function Docxtemplater() {
+		_classCallCheck(this, Docxtemplater);
+
+		if (arguments.length > 0) {
+			throw new Error("The constructor with parameters has been removed in docxtemplater 3.0, please check the upgrade guide.");
+		}
+		this.compiled = {};
+		this.modules = [];
+		this.setOptions({});
+	}
+
+	_createClass(Docxtemplater, [{
+		key: "setModules",
+		value: function setModules(obj) {
+			this.modules.forEach(function (module) {
+				module.set(obj);
+			});
+		}
+	}, {
+		key: "sendEvent",
+		value: function sendEvent(eventName) {
+			this.modules.forEach(function (module) {
+				module.on(eventName);
+			});
+		}
+	}, {
+		key: "attachModule",
+		value: function attachModule(module) {
+			var options = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+			var prefix = options.prefix;
+
+			if (prefix) {
+				module.prefix = prefix;
+			}
+			this.modules.push(moduleWrapper(module));
+			return this;
+		}
+	}, {
+		key: "setOptions",
+		value: function setOptions(options) {
+			var _this = this;
+
+			this.options = options;
+			Object.keys(defaults).forEach(function (key) {
+				var defaultValue = defaults[key];
+				_this.options[key] = _this.options[key] != null ? _this.options[key] : defaultValue;
+				_this[key] = _this.options[key];
+			});
+			if (this.zip) {
+				this.updateFileTypeConfig();
+			}
+			return this;
+		}
+	}, {
+		key: "loadZip",
+		value: function loadZip(zip) {
+			if (zip.loadAsync) {
+				throw new XTInternalError("Docxtemplater doesn't handle JSZip version >=3, see changelog");
+			}
+			this.zip = zip;
+			this.updateFileTypeConfig();
+			return this;
+		}
+	}, {
+		key: "compileFile",
+		value: function compileFile(fileName) {
+			var currentFile = this.createTemplateClass(fileName);
+			currentFile.parse();
+			this.compiled[fileName] = currentFile;
+		}
+	}, {
+		key: "compile",
+		value: function compile() {
+			var _this2 = this;
+
+			if (Object.keys(this.compiled).length) {
+				return this;
+			}
+
+			this.modules = concatArrays([this.fileTypeConfig.baseModules.map(function (moduleFunction) {
+				return moduleFunction();
+			}), this.modules]);
+			this.options = this.modules.reduce(function (options, module) {
+				return module.optionsTransformer(options, _this2);
+			}, this.options);
+			this.options.xmlFileNames = unique(this.options.xmlFileNames);
+			this.xmlDocuments = this.options.xmlFileNames.reduce(function (xmlDocuments, fileName) {
+				var content = _this2.zip.files[fileName].asText();
+				xmlDocuments[fileName] = str2xml(content);
+				return xmlDocuments;
+			}, {});
+			this.setModules({
+				zip: this.zip,
+				xmlDocuments: this.xmlDocuments,
+				data: this.data
+			});
+			this.getTemplatedFiles();
+			this.setModules({ compiled: this.compiled });
+			// Loop inside all templatedFiles (ie xml files with content).
+			// Sometimes they don't exist (footer.xml for example)
+			this.templatedFiles.forEach(function (fileName) {
+				if (_this2.zip.files[fileName] != null) {
+					_this2.compileFile(fileName);
+				}
+			});
+			return this;
+		}
+	}, {
+		key: "updateFileTypeConfig",
+		value: function updateFileTypeConfig() {
+			var fileType = void 0;
+			if (this.zip.files.mimetype) {
+				fileType = "odt";
+			}
+			if (this.zip.files["word/document.xml"] || this.zip.files["word/document2.xml"]) {
+				fileType = "docx";
+			}
+			if (this.zip.files["ppt/presentation.xml"]) {
+				fileType = "pptx";
+			}
+
+			if (fileType === "odt") {
+				throwFileTypeNotHandled(fileType);
+			}
+			if (!fileType) {
+				throwFileTypeNotIdentified();
+			}
+			this.fileType = fileType;
+			this.fileTypeConfig = this.options.fileTypeConfig || Docxtemplater.FileTypeConfig[this.fileType];
+			return this;
+		}
+	}, {
+		key: "render",
+		value: function render() {
+			var _this3 = this;
+
+			this.compile();
+			this.mapper = this.modules.reduce(function (value, module) {
+				return module.getRenderedMap(value);
+			}, {});
+
+			this.fileTypeConfig.tagsXmlLexedArray = unique(this.fileTypeConfig.tagsXmlLexedArray);
+			this.fileTypeConfig.tagsXmlTextArray = unique(this.fileTypeConfig.tagsXmlTextArray);
+
+			Object.keys(this.mapper).forEach(function (to) {
+				var _mapper$to = _this3.mapper[to],
+				    from = _mapper$to.from,
+				    data = _mapper$to.data;
+
+				var currentFile = _this3.compiled[from];
+				currentFile.setTags(data);
+				currentFile.render(to);
+				_this3.zip.file(to, currentFile.content, { createFolders: true });
+			});
+			this.sendEvent("syncing-zip");
+			this.syncZip();
+			return this;
+		}
+	}, {
+		key: "syncZip",
+		value: function syncZip() {
+			var _this4 = this;
+
+			Object.keys(this.xmlDocuments).forEach(function (fileName) {
+				_this4.zip.remove(fileName);
+				var content = xml2str(_this4.xmlDocuments[fileName]);
+				return _this4.zip.file(fileName, content, { createFolders: true });
+			});
+		}
+	}, {
+		key: "setData",
+		value: function setData(data) {
+			this.data = data;
+			return this;
+		}
+	}, {
+		key: "getZip",
+		value: function getZip() {
+			return this.zip;
+		}
+	}, {
+		key: "createTemplateClass",
+		value: function createTemplateClass(path) {
+			var usedData = this.zip.files[path].asText();
+			return this.createTemplateClassFromContent(usedData, path);
+		}
+	}, {
+		key: "createTemplateClassFromContent",
+		value: function createTemplateClassFromContent(content, filePath) {
+			var _this5 = this;
+
+			var xmltOptions = {
+				filePath: filePath
+			};
+			Object.keys(defaults).forEach(function (key) {
+				xmltOptions[key] = _this5[key];
+			});
+			xmltOptions.fileTypeConfig = this.fileTypeConfig;
+			xmltOptions.modules = this.modules;
+			return new Docxtemplater.XmlTemplater(content, xmltOptions);
+		}
+	}, {
+		key: "getFullText",
+		value: function getFullText(path) {
+			return this.createTemplateClass(path || this.fileTypeConfig.textPath(this.zip)).getFullText();
+		}
+	}, {
+		key: "getTemplatedFiles",
+		value: function getTemplatedFiles() {
+			this.templatedFiles = this.fileTypeConfig.getTemplatedFiles(this.zip);
+			return this.templatedFiles;
+		}
+	}]);
+
+	return Docxtemplater;
+}();
+
+Docxtemplater.DocUtils = DocUtils;
+Docxtemplater.Errors = __webpack_require__(1);
+Docxtemplater.XmlTemplater = __webpack_require__(32);
+Docxtemplater.FileTypeConfig = __webpack_require__(37);
+Docxtemplater.XmlMatcher = __webpack_require__(13);
+module.exports = Docxtemplater;
+
+/***/ }),
+/* 30 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+function DOMParser(options) {
+	this.options = options || { locator: {} };
+}
+DOMParser.prototype.parseFromString = function (source, mimeType) {
+	var options = this.options;
+	var sax = new XMLReader();
+	var domBuilder = options.domBuilder || new DOMHandler(); //contentHandler and LexicalHandler
+	var errorHandler = options.errorHandler;
+	var locator = options.locator;
+	var defaultNSMap = options.xmlns || {};
+	var entityMap = { 'lt': '<', 'gt': '>', 'amp': '&', 'quot': '"', 'apos': "'" };
+	if (locator) {
+		domBuilder.setDocumentLocator(locator);
+	}
+
+	sax.errorHandler = buildErrorHandler(errorHandler, domBuilder, locator);
+	sax.domBuilder = options.domBuilder || domBuilder;
+	if (/\/x?html?$/.test(mimeType)) {
+		entityMap.nbsp = '\xa0';
+		entityMap.copy = '\xa9';
+		defaultNSMap[''] = 'http://www.w3.org/1999/xhtml';
+	}
+	defaultNSMap.xml = defaultNSMap.xml || 'http://www.w3.org/XML/1998/namespace';
+	if (source) {
+		sax.parse(source, defaultNSMap, entityMap);
+	} else {
+		sax.errorHandler.error("invalid doc source");
+	}
+	return domBuilder.doc;
+};
+function buildErrorHandler(errorImpl, domBuilder, locator) {
+	if (!errorImpl) {
+		if (domBuilder instanceof DOMHandler) {
+			return domBuilder;
+		}
+		errorImpl = domBuilder;
+	}
+	var errorHandler = {};
+	var isCallback = errorImpl instanceof Function;
+	locator = locator || {};
+	function build(key) {
+		var fn = errorImpl[key];
+		if (!fn && isCallback) {
+			fn = errorImpl.length == 2 ? function (msg) {
+				errorImpl(key, msg);
+			} : errorImpl;
+		}
+		errorHandler[key] = fn && function (msg) {
+			fn('[xmldom ' + key + ']\t' + msg + _locator(locator));
+		} || function () {};
+	}
+	build('warning');
+	build('error');
+	build('fatalError');
+	return errorHandler;
+}
+
+//console.log('#\n\n\n\n\n\n\n####')
+/**
+ * +ContentHandler+ErrorHandler
+ * +LexicalHandler+EntityResolver2
+ * -DeclHandler-DTDHandler 
+ * 
+ * DefaultHandler:EntityResolver, DTDHandler, ContentHandler, ErrorHandler
+ * DefaultHandler2:DefaultHandler,LexicalHandler, DeclHandler, EntityResolver2
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/helpers/DefaultHandler.html
+ */
+function DOMHandler() {
+	this.cdata = false;
+}
+function position(locator, node) {
+	node.lineNumber = locator.lineNumber;
+	node.columnNumber = locator.columnNumber;
+}
+/**
+ * @see org.xml.sax.ContentHandler#startDocument
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/ContentHandler.html
+ */
+DOMHandler.prototype = {
+	startDocument: function startDocument() {
+		this.doc = new DOMImplementation().createDocument(null, null, null);
+		if (this.locator) {
+			this.doc.documentURI = this.locator.systemId;
+		}
+	},
+	startElement: function startElement(namespaceURI, localName, qName, attrs) {
+		var doc = this.doc;
+		var el = doc.createElementNS(namespaceURI, qName || localName);
+		var len = attrs.length;
+		appendElement(this, el);
+		this.currentElement = el;
+
+		this.locator && position(this.locator, el);
+		for (var i = 0; i < len; i++) {
+			var namespaceURI = attrs.getURI(i);
+			var value = attrs.getValue(i);
+			var qName = attrs.getQName(i);
+			var attr = doc.createAttributeNS(namespaceURI, qName);
+			this.locator && position(attrs.getLocator(i), attr);
+			attr.value = attr.nodeValue = value;
+			el.setAttributeNode(attr);
+		}
+	},
+	endElement: function endElement(namespaceURI, localName, qName) {
+		var current = this.currentElement;
+		var tagName = current.tagName;
+		this.currentElement = current.parentNode;
+	},
+	startPrefixMapping: function startPrefixMapping(prefix, uri) {},
+	endPrefixMapping: function endPrefixMapping(prefix) {},
+	processingInstruction: function processingInstruction(target, data) {
+		var ins = this.doc.createProcessingInstruction(target, data);
+		this.locator && position(this.locator, ins);
+		appendElement(this, ins);
+	},
+	ignorableWhitespace: function ignorableWhitespace(ch, start, length) {},
+	characters: function characters(chars, start, length) {
+		chars = _toString.apply(this, arguments);
+		//console.log(chars)
+		if (chars) {
+			if (this.cdata) {
+				var charNode = this.doc.createCDATASection(chars);
+			} else {
+				var charNode = this.doc.createTextNode(chars);
+			}
+			if (this.currentElement) {
+				this.currentElement.appendChild(charNode);
+			} else if (/^\s*$/.test(chars)) {
+				this.doc.appendChild(charNode);
+				//process xml
+			}
+			this.locator && position(this.locator, charNode);
+		}
+	},
+	skippedEntity: function skippedEntity(name) {},
+	endDocument: function endDocument() {
+		this.doc.normalize();
+	},
+	setDocumentLocator: function setDocumentLocator(locator) {
+		if (this.locator = locator) {
+			// && !('lineNumber' in locator)){
+			locator.lineNumber = 0;
+		}
+	},
+	//LexicalHandler
+	comment: function comment(chars, start, length) {
+		chars = _toString.apply(this, arguments);
+		var comm = this.doc.createComment(chars);
+		this.locator && position(this.locator, comm);
+		appendElement(this, comm);
+	},
+
+	startCDATA: function startCDATA() {
+		//used in characters() methods
+		this.cdata = true;
+	},
+	endCDATA: function endCDATA() {
+		this.cdata = false;
+	},
+
+	startDTD: function startDTD(name, publicId, systemId) {
+		var impl = this.doc.implementation;
+		if (impl && impl.createDocumentType) {
+			var dt = impl.createDocumentType(name, publicId, systemId);
+			this.locator && position(this.locator, dt);
+			appendElement(this, dt);
+		}
+	},
+	/**
+  * @see org.xml.sax.ErrorHandler
+  * @link http://www.saxproject.org/apidoc/org/xml/sax/ErrorHandler.html
+  */
+	warning: function warning(error) {
+		console.warn('[xmldom warning]\t' + error, _locator(this.locator));
+	},
+	error: function error(_error) {
+		console.error('[xmldom error]\t' + _error, _locator(this.locator));
+	},
+	fatalError: function fatalError(error) {
+		console.error('[xmldom fatalError]\t' + error, _locator(this.locator));
+		throw error;
+	}
+};
+function _locator(l) {
+	if (l) {
+		return '\n@' + (l.systemId || '') + '#[line:' + l.lineNumber + ',col:' + l.columnNumber + ']';
+	}
+}
+function _toString(chars, start, length) {
+	if (typeof chars == 'string') {
+		return chars.substr(start, length);
+	} else {
+		//java sax connect width xmldom on rhino(what about: "? && !(chars instanceof String)")
+		if (chars.length >= start + length || start) {
+			return new java.lang.String(chars, start, length) + '';
+		}
+		return chars;
+	}
+}
+
+/*
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/LexicalHandler.html
+ * used method of org.xml.sax.ext.LexicalHandler:
+ *  #comment(chars, start, length)
+ *  #startCDATA()
+ *  #endCDATA()
+ *  #startDTD(name, publicId, systemId)
+ *
+ *
+ * IGNORED method of org.xml.sax.ext.LexicalHandler:
+ *  #endDTD()
+ *  #startEntity(name)
+ *  #endEntity(name)
+ *
+ *
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/DeclHandler.html
+ * IGNORED method of org.xml.sax.ext.DeclHandler
+ * 	#attributeDecl(eName, aName, type, mode, value)
+ *  #elementDecl(name, model)
+ *  #externalEntityDecl(name, publicId, systemId)
+ *  #internalEntityDecl(name, value)
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/EntityResolver2.html
+ * IGNORED method of org.xml.sax.EntityResolver2
+ *  #resolveEntity(String name,String publicId,String baseURI,String systemId)
+ *  #resolveEntity(publicId, systemId)
+ *  #getExternalSubset(name, baseURI)
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/DTDHandler.html
+ * IGNORED method of org.xml.sax.DTDHandler
+ *  #notationDecl(name, publicId, systemId) {};
+ *  #unparsedEntityDecl(name, publicId, systemId, notationName) {};
+ */
+"endDTD,startEntity,endEntity,attributeDecl,elementDecl,externalEntityDecl,internalEntityDecl,resolveEntity,getExternalSubset,notationDecl,unparsedEntityDecl".replace(/\w+/g, function (key) {
+	DOMHandler.prototype[key] = function () {
+		return null;
+	};
+});
+
+/* Private static helpers treated below as private instance methods, so don't need to add these to the public API; we might use a Relator to also get rid of non-standard public properties */
+function appendElement(hander, node) {
+	if (!hander.currentElement) {
+		hander.doc.appendChild(node);
+	} else {
+		hander.currentElement.appendChild(node);
+	}
+} //appendChild and setAttributeNS are preformance key
+
+//if(typeof require == 'function'){
+var XMLReader = __webpack_require__(31).XMLReader;
+var DOMImplementation = exports.DOMImplementation = __webpack_require__(12).DOMImplementation;
+exports.XMLSerializer = __webpack_require__(12).XMLSerializer;
+exports.DOMParser = DOMParser;
+//}
+
+/***/ }),
+/* 31 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+//[4]   	NameStartChar	   ::=   	":" | [A-Z] | "_" | [a-z] | [#xC0-#xD6] | [#xD8-#xF6] | [#xF8-#x2FF] | [#x370-#x37D] | [#x37F-#x1FFF] | [#x200C-#x200D] | [#x2070-#x218F] | [#x2C00-#x2FEF] | [#x3001-#xD7FF] | [#xF900-#xFDCF] | [#xFDF0-#xFFFD] | [#x10000-#xEFFFF]
+//[4a]   	NameChar	   ::=   	NameStartChar | "-" | "." | [0-9] | #xB7 | [#x0300-#x036F] | [#x203F-#x2040]
+//[5]   	Name	   ::=   	NameStartChar (NameChar)*
+var nameStartChar = /[A-Z_a-z\xC0-\xD6\xD8-\xF6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/; //\u10000-\uEFFFF
+var nameChar = new RegExp("[\\-\\.0-9" + nameStartChar.source.slice(1, -1) + "\\u00B7\\u0300-\\u036F\\u203F-\\u2040]");
+var tagNamePattern = new RegExp('^' + nameStartChar.source + nameChar.source + '*(?:\:' + nameStartChar.source + nameChar.source + '*)?$');
+//var tagNamePattern = /^[a-zA-Z_][\w\-\.]*(?:\:[a-zA-Z_][\w\-\.]*)?$/
+//var handlers = 'resolveEntity,getExternalSubset,characters,endDocument,endElement,endPrefixMapping,ignorableWhitespace,processingInstruction,setDocumentLocator,skippedEntity,startDocument,startElement,startPrefixMapping,notationDecl,unparsedEntityDecl,error,fatalError,warning,attributeDecl,elementDecl,externalEntityDecl,internalEntityDecl,comment,endCDATA,endDTD,endEntity,startCDATA,startDTD,startEntity'.split(',')
+
+//S_TAG,	S_ATTR,	S_EQ,	S_ATTR_NOQUOT_VALUE
+//S_ATTR_SPACE,	S_ATTR_END,	S_TAG_SPACE, S_TAG_CLOSE
+var S_TAG = 0; //tag name offerring
+var S_ATTR = 1; //attr name offerring 
+var S_ATTR_SPACE = 2; //attr name end and space offer
+var S_EQ = 3; //=space?
+var S_ATTR_NOQUOT_VALUE = 4; //attr value(no quot value only)
+var S_ATTR_END = 5; //attr value end and no space(quot end)
+var S_TAG_SPACE = 6; //(attr value end || tag end ) && (space offer)
+var S_TAG_CLOSE = 7; //closed el<el />
+
+function XMLReader() {}
+
+XMLReader.prototype = {
+	parse: function parse(source, defaultNSMap, entityMap) {
+		var domBuilder = this.domBuilder;
+		domBuilder.startDocument();
+		_copy(defaultNSMap, defaultNSMap = {});
+		_parse(source, defaultNSMap, entityMap, domBuilder, this.errorHandler);
+		domBuilder.endDocument();
+	}
+};
+function _parse(source, defaultNSMapCopy, entityMap, domBuilder, errorHandler) {
+	function fixedFromCharCode(code) {
+		// String.prototype.fromCharCode does not supports
+		// > 2 bytes unicode chars directly
+		if (code > 0xffff) {
+			code -= 0x10000;
+			var surrogate1 = 0xd800 + (code >> 10),
+			    surrogate2 = 0xdc00 + (code & 0x3ff);
+
+			return String.fromCharCode(surrogate1, surrogate2);
+		} else {
+			return String.fromCharCode(code);
+		}
+	}
+	function entityReplacer(a) {
+		var k = a.slice(1, -1);
+		if (k in entityMap) {
+			return entityMap[k];
+		} else if (k.charAt(0) === '#') {
+			return fixedFromCharCode(parseInt(k.substr(1).replace('x', '0x')));
+		} else {
+			errorHandler.error('entity not found:' + a);
+			return a;
+		}
+	}
+	function appendText(end) {
+		//has some bugs
+		if (end > start) {
+			var xt = source.substring(start, end).replace(/&#?\w+;/g, entityReplacer);
+			locator && position(start);
+			domBuilder.characters(xt, 0, end - start);
+			start = end;
+		}
+	}
+	function position(p, m) {
+		while (p >= lineEnd && (m = linePattern.exec(source))) {
+			lineStart = m.index;
+			lineEnd = lineStart + m[0].length;
+			locator.lineNumber++;
+			//console.log('line++:',locator,startPos,endPos)
+		}
+		locator.columnNumber = p - lineStart + 1;
+	}
+	var lineStart = 0;
+	var lineEnd = 0;
+	var linePattern = /.*(?:\r\n?|\n)|.*$/g;
+	var locator = domBuilder.locator;
+
+	var parseStack = [{ currentNSMap: defaultNSMapCopy }];
+	var closeMap = {};
+	var start = 0;
+	while (true) {
+		try {
+			var tagStart = source.indexOf('<', start);
+			if (tagStart < 0) {
+				if (!source.substr(start).match(/^\s*$/)) {
+					var doc = domBuilder.doc;
+					var text = doc.createTextNode(source.substr(start));
+					doc.appendChild(text);
+					domBuilder.currentElement = text;
+				}
+				return;
+			}
+			if (tagStart > start) {
+				appendText(tagStart);
+			}
+			switch (source.charAt(tagStart + 1)) {
+				case '/':
+					var end = source.indexOf('>', tagStart + 3);
+					var tagName = source.substring(tagStart + 2, end);
+					var config = parseStack.pop();
+					if (end < 0) {
+
+						tagName = source.substring(tagStart + 2).replace(/[\s<].*/, '');
+						//console.error('#@@@@@@'+tagName)
+						errorHandler.error("end tag name: " + tagName + ' is not complete:' + config.tagName);
+						end = tagStart + 1 + tagName.length;
+					} else if (tagName.match(/\s</)) {
+						tagName = tagName.replace(/[\s<].*/, '');
+						errorHandler.error("end tag name: " + tagName + ' maybe not complete');
+						end = tagStart + 1 + tagName.length;
+					}
+					//console.error(parseStack.length,parseStack)
+					//console.error(config);
+					var localNSMap = config.localNSMap;
+					var endMatch = config.tagName == tagName;
+					var endIgnoreCaseMach = endMatch || config.tagName && config.tagName.toLowerCase() == tagName.toLowerCase();
+					if (endIgnoreCaseMach) {
+						domBuilder.endElement(config.uri, config.localName, tagName);
+						if (localNSMap) {
+							for (var prefix in localNSMap) {
+								domBuilder.endPrefixMapping(prefix);
+							}
+						}
+						if (!endMatch) {
+							errorHandler.fatalError("end tag name: " + tagName + ' is not match the current start tagName:' + config.tagName);
+						}
+					} else {
+						parseStack.push(config);
+					}
+
+					end++;
+					break;
+				// end elment
+				case '?':
+					// <?...?>
+					locator && position(tagStart);
+					end = parseInstruction(source, tagStart, domBuilder);
+					break;
+				case '!':
+					// <!doctype,<![CDATA,<!--
+					locator && position(tagStart);
+					end = parseDCC(source, tagStart, domBuilder, errorHandler);
+					break;
+				default:
+					locator && position(tagStart);
+					var el = new ElementAttributes();
+					var currentNSMap = parseStack[parseStack.length - 1].currentNSMap;
+					//elStartEnd
+					var end = parseElementStartPart(source, tagStart, el, currentNSMap, entityReplacer, errorHandler);
+					var len = el.length;
+
+					if (!el.closed && fixSelfClosed(source, end, el.tagName, closeMap)) {
+						el.closed = true;
+						if (!entityMap.nbsp) {
+							errorHandler.warning('unclosed xml attribute');
+						}
+					}
+					if (locator && len) {
+						var locator2 = copyLocator(locator, {});
+						//try{//attribute position fixed
+						for (var i = 0; i < len; i++) {
+							var a = el[i];
+							position(a.offset);
+							a.locator = copyLocator(locator, {});
+						}
+						//}catch(e){console.error('@@@@@'+e)}
+						domBuilder.locator = locator2;
+						if (appendElement(el, domBuilder, currentNSMap)) {
+							parseStack.push(el);
+						}
+						domBuilder.locator = locator;
+					} else {
+						if (appendElement(el, domBuilder, currentNSMap)) {
+							parseStack.push(el);
+						}
+					}
+
+					if (el.uri === 'http://www.w3.org/1999/xhtml' && !el.closed) {
+						end = parseHtmlSpecialContent(source, end, el.tagName, entityReplacer, domBuilder);
+					} else {
+						end++;
+					}
+			}
+		} catch (e) {
+			errorHandler.error('element parse error: ' + e);
+			//errorHandler.error('element parse error: '+e);
+			end = -1;
+			//throw e;
+		}
+		if (end > start) {
+			start = end;
+		} else {
+			//TODO: 这里有可能sax回退，有位置错误风险
+			appendText(Math.max(tagStart, start) + 1);
+		}
+	}
+}
+function copyLocator(f, t) {
+	t.lineNumber = f.lineNumber;
+	t.columnNumber = f.columnNumber;
+	return t;
+}
+
+/**
+ * @see #appendElement(source,elStartEnd,el,selfClosed,entityReplacer,domBuilder,parseStack);
+ * @return end of the elementStartPart(end of elementEndPart for selfClosed el)
+ */
+function parseElementStartPart(source, start, el, currentNSMap, entityReplacer, errorHandler) {
+	var attrName;
+	var value;
+	var p = ++start;
+	var s = S_TAG; //status
+	while (true) {
+		var c = source.charAt(p);
+		switch (c) {
+			case '=':
+				if (s === S_ATTR) {
+					//attrName
+					attrName = source.slice(start, p);
+					s = S_EQ;
+				} else if (s === S_ATTR_SPACE) {
+					s = S_EQ;
+				} else {
+					//fatalError: equal must after attrName or space after attrName
+					throw new Error('attribute equal must after attrName');
+				}
+				break;
+			case '\'':
+			case '"':
+				if (s === S_EQ || s === S_ATTR //|| s == S_ATTR_SPACE
+				) {
+						//equal
+						if (s === S_ATTR) {
+							errorHandler.warning('attribute value must after "="');
+							attrName = source.slice(start, p);
+						}
+						start = p + 1;
+						p = source.indexOf(c, start);
+						if (p > 0) {
+							value = source.slice(start, p).replace(/&#?\w+;/g, entityReplacer);
+							el.add(attrName, value, start - 1);
+							s = S_ATTR_END;
+						} else {
+							//fatalError: no end quot match
+							throw new Error('attribute value no end \'' + c + '\' match');
+						}
+					} else if (s == S_ATTR_NOQUOT_VALUE) {
+					value = source.slice(start, p).replace(/&#?\w+;/g, entityReplacer);
+					//console.log(attrName,value,start,p)
+					el.add(attrName, value, start);
+					//console.dir(el)
+					errorHandler.warning('attribute "' + attrName + '" missed start quot(' + c + ')!!');
+					start = p + 1;
+					s = S_ATTR_END;
+				} else {
+					//fatalError: no equal before
+					throw new Error('attribute value must after "="');
+				}
+				break;
+			case '/':
+				switch (s) {
+					case S_TAG:
+						el.setTagName(source.slice(start, p));
+					case S_ATTR_END:
+					case S_TAG_SPACE:
+					case S_TAG_CLOSE:
+						s = S_TAG_CLOSE;
+						el.closed = true;
+					case S_ATTR_NOQUOT_VALUE:
+					case S_ATTR:
+					case S_ATTR_SPACE:
+						break;
+					//case S_EQ:
+					default:
+						throw new Error("attribute invalid close char('/')");
+				}
+				break;
+			case '':
+				//end document
+				//throw new Error('unexpected end of input')
+				errorHandler.error('unexpected end of input');
+				if (s == S_TAG) {
+					el.setTagName(source.slice(start, p));
+				}
+				return p;
+			case '>':
+				switch (s) {
+					case S_TAG:
+						el.setTagName(source.slice(start, p));
+					case S_ATTR_END:
+					case S_TAG_SPACE:
+					case S_TAG_CLOSE:
+						break; //normal
+					case S_ATTR_NOQUOT_VALUE: //Compatible state
+					case S_ATTR:
+						value = source.slice(start, p);
+						if (value.slice(-1) === '/') {
+							el.closed = true;
+							value = value.slice(0, -1);
+						}
+					case S_ATTR_SPACE:
+						if (s === S_ATTR_SPACE) {
+							value = attrName;
+						}
+						if (s == S_ATTR_NOQUOT_VALUE) {
+							errorHandler.warning('attribute "' + value + '" missed quot(")!!');
+							el.add(attrName, value.replace(/&#?\w+;/g, entityReplacer), start);
+						} else {
+							if (currentNSMap[''] !== 'http://www.w3.org/1999/xhtml' || !value.match(/^(?:disabled|checked|selected)$/i)) {
+								errorHandler.warning('attribute "' + value + '" missed value!! "' + value + '" instead!!');
+							}
+							el.add(value, value, start);
+						}
+						break;
+					case S_EQ:
+						throw new Error('attribute value missed!!');
+				}
+				//			console.log(tagName,tagNamePattern,tagNamePattern.test(tagName))
+				return p;
+			/*xml space '\x20' | #x9 | #xD | #xA; */
+			case "\x80":
+				c = ' ';
+			default:
+				if (c <= ' ') {
+					//space
+					switch (s) {
+						case S_TAG:
+							el.setTagName(source.slice(start, p)); //tagName
+							s = S_TAG_SPACE;
+							break;
+						case S_ATTR:
+							attrName = source.slice(start, p);
+							s = S_ATTR_SPACE;
+							break;
+						case S_ATTR_NOQUOT_VALUE:
+							var value = source.slice(start, p).replace(/&#?\w+;/g, entityReplacer);
+							errorHandler.warning('attribute "' + value + '" missed quot(")!!');
+							el.add(attrName, value, start);
+						case S_ATTR_END:
+							s = S_TAG_SPACE;
+							break;
+						//case S_TAG_SPACE:
+						//case S_EQ:
+						//case S_ATTR_SPACE:
+						//	void();break;
+						//case S_TAG_CLOSE:
+						//ignore warning
+					}
+				} else {
+					//not space
+					//S_TAG,	S_ATTR,	S_EQ,	S_ATTR_NOQUOT_VALUE
+					//S_ATTR_SPACE,	S_ATTR_END,	S_TAG_SPACE, S_TAG_CLOSE
+					switch (s) {
+						//case S_TAG:void();break;
+						//case S_ATTR:void();break;
+						//case S_ATTR_NOQUOT_VALUE:void();break;
+						case S_ATTR_SPACE:
+							var tagName = el.tagName;
+							if (currentNSMap[''] !== 'http://www.w3.org/1999/xhtml' || !attrName.match(/^(?:disabled|checked|selected)$/i)) {
+								errorHandler.warning('attribute "' + attrName + '" missed value!! "' + attrName + '" instead2!!');
+							}
+							el.add(attrName, attrName, start);
+							start = p;
+							s = S_ATTR;
+							break;
+						case S_ATTR_END:
+							errorHandler.warning('attribute space is required"' + attrName + '"!!');
+						case S_TAG_SPACE:
+							s = S_ATTR;
+							start = p;
+							break;
+						case S_EQ:
+							s = S_ATTR_NOQUOT_VALUE;
+							start = p;
+							break;
+						case S_TAG_CLOSE:
+							throw new Error("elements closed character '/' and '>' must be connected to");
+					}
+				}
+		} //end outer switch
+		//console.log('p++',p)
+		p++;
+	}
+}
+/**
+ * @return true if has new namespace define
+ */
+function appendElement(el, domBuilder, currentNSMap) {
+	var tagName = el.tagName;
+	var localNSMap = null;
+	//var currentNSMap = parseStack[parseStack.length-1].currentNSMap;
+	var i = el.length;
+	while (i--) {
+		var a = el[i];
+		var qName = a.qName;
+		var value = a.value;
+		var nsp = qName.indexOf(':');
+		if (nsp > 0) {
+			var prefix = a.prefix = qName.slice(0, nsp);
+			var localName = qName.slice(nsp + 1);
+			var nsPrefix = prefix === 'xmlns' && localName;
+		} else {
+			localName = qName;
+			prefix = null;
+			nsPrefix = qName === 'xmlns' && '';
+		}
+		//can not set prefix,because prefix !== ''
+		a.localName = localName;
+		//prefix == null for no ns prefix attribute 
+		if (nsPrefix !== false) {
+			//hack!!
+			if (localNSMap == null) {
+				localNSMap = {};
+				//console.log(currentNSMap,0)
+				_copy(currentNSMap, currentNSMap = {});
+				//console.log(currentNSMap,1)
+			}
+			currentNSMap[nsPrefix] = localNSMap[nsPrefix] = value;
+			a.uri = 'http://www.w3.org/2000/xmlns/';
+			domBuilder.startPrefixMapping(nsPrefix, value);
+		}
+	}
+	var i = el.length;
+	while (i--) {
+		a = el[i];
+		var prefix = a.prefix;
+		if (prefix) {
+			//no prefix attribute has no namespace
+			if (prefix === 'xml') {
+				a.uri = 'http://www.w3.org/XML/1998/namespace';
+			}if (prefix !== 'xmlns') {
+				a.uri = currentNSMap[prefix || ''];
+
+				//{console.log('###'+a.qName,domBuilder.locator.systemId+'',currentNSMap,a.uri)}
+			}
+		}
+	}
+	var nsp = tagName.indexOf(':');
+	if (nsp > 0) {
+		prefix = el.prefix = tagName.slice(0, nsp);
+		localName = el.localName = tagName.slice(nsp + 1);
+	} else {
+		prefix = null; //important!!
+		localName = el.localName = tagName;
+	}
+	//no prefix element has default namespace
+	var ns = el.uri = currentNSMap[prefix || ''];
+	domBuilder.startElement(ns, localName, tagName, el);
+	//endPrefixMapping and startPrefixMapping have not any help for dom builder
+	//localNSMap = null
+	if (el.closed) {
+		domBuilder.endElement(ns, localName, tagName);
+		if (localNSMap) {
+			for (prefix in localNSMap) {
+				domBuilder.endPrefixMapping(prefix);
+			}
+		}
+	} else {
+		el.currentNSMap = currentNSMap;
+		el.localNSMap = localNSMap;
+		//parseStack.push(el);
+		return true;
+	}
+}
+function parseHtmlSpecialContent(source, elStartEnd, tagName, entityReplacer, domBuilder) {
+	if (/^(?:script|textarea)$/i.test(tagName)) {
+		var elEndStart = source.indexOf('</' + tagName + '>', elStartEnd);
+		var text = source.substring(elStartEnd + 1, elEndStart);
+		if (/[&<]/.test(text)) {
+			if (/^script$/i.test(tagName)) {
+				//if(!/\]\]>/.test(text)){
+				//lexHandler.startCDATA();
+				domBuilder.characters(text, 0, text.length);
+				//lexHandler.endCDATA();
+				return elEndStart;
+				//}
+			} //}else{//text area
+			text = text.replace(/&#?\w+;/g, entityReplacer);
+			domBuilder.characters(text, 0, text.length);
+			return elEndStart;
+			//}
+		}
+	}
+	return elStartEnd + 1;
+}
+function fixSelfClosed(source, elStartEnd, tagName, closeMap) {
+	//if(tagName in closeMap){
+	var pos = closeMap[tagName];
+	if (pos == null) {
+		//console.log(tagName)
+		pos = source.lastIndexOf('</' + tagName + '>');
+		if (pos < elStartEnd) {
+			//忘记闭合
+			pos = source.lastIndexOf('</' + tagName);
+		}
+		closeMap[tagName] = pos;
+	}
+	return pos < elStartEnd;
+	//} 
+}
+function _copy(source, target) {
+	for (var n in source) {
+		target[n] = source[n];
+	}
+}
+function parseDCC(source, start, domBuilder, errorHandler) {
+	//sure start with '<!'
+	var next = source.charAt(start + 2);
+	switch (next) {
+		case '-':
+			if (source.charAt(start + 3) === '-') {
+				var end = source.indexOf('-->', start + 4);
+				//append comment source.substring(4,end)//<!--
+				if (end > start) {
+					domBuilder.comment(source, start + 4, end - start - 4);
+					return end + 3;
+				} else {
+					errorHandler.error("Unclosed comment");
+					return -1;
+				}
+			} else {
+				//error
+				return -1;
+			}
+		default:
+			if (source.substr(start + 3, 6) == 'CDATA[') {
+				var end = source.indexOf(']]>', start + 9);
+				domBuilder.startCDATA();
+				domBuilder.characters(source, start + 9, end - start - 9);
+				domBuilder.endCDATA();
+				return end + 3;
+			}
+			//<!DOCTYPE
+			//startDTD(java.lang.String name, java.lang.String publicId, java.lang.String systemId) 
+			var matchs = split(source, start);
+			var len = matchs.length;
+			if (len > 1 && /!doctype/i.test(matchs[0][0])) {
+				var name = matchs[1][0];
+				var pubid = len > 3 && /^public$/i.test(matchs[2][0]) && matchs[3][0];
+				var sysid = len > 4 && matchs[4][0];
+				var lastMatch = matchs[len - 1];
+				domBuilder.startDTD(name, pubid && pubid.replace(/^(['"])(.*?)\1$/, '$2'), sysid && sysid.replace(/^(['"])(.*?)\1$/, '$2'));
+				domBuilder.endDTD();
+
+				return lastMatch.index + lastMatch[0].length;
+			}
+	}
+	return -1;
+}
+
+function parseInstruction(source, start, domBuilder) {
+	var end = source.indexOf('?>', start);
+	if (end) {
+		var match = source.substring(start, end).match(/^<\?(\S*)\s*([\s\S]*?)\s*$/);
+		if (match) {
+			var len = match[0].length;
+			domBuilder.processingInstruction(match[1], match[2]);
+			return end + 2;
+		} else {
+			//error
+			return -1;
+		}
+	}
+	return -1;
+}
+
+/**
+ * @param source
+ */
+function ElementAttributes(source) {}
+ElementAttributes.prototype = {
+	setTagName: function setTagName(tagName) {
+		if (!tagNamePattern.test(tagName)) {
+			throw new Error('invalid tagName:' + tagName);
+		}
+		this.tagName = tagName;
+	},
+	add: function add(qName, value, offset) {
+		if (!tagNamePattern.test(qName)) {
+			throw new Error('invalid attribute:' + qName);
+		}
+		this[this.length++] = { qName: qName, value: value, offset: offset };
+	},
+	length: 0,
+	getLocalName: function getLocalName(i) {
+		return this[i].localName;
+	},
+	getLocator: function getLocator(i) {
+		return this[i].locator;
+	},
+	getQName: function getQName(i) {
+		return this[i].qName;
+	},
+	getURI: function getURI(i) {
+		return this[i].uri;
+	},
+	getValue: function getValue(i) {
+		return this[i].value;
+	}
+	//	,getIndex:function(uri, localName)){
+	//		if(localName){
+	//			
+	//		}else{
+	//			var qName = uri
+	//		}
+	//	},
+	//	getValue:function(){return this.getValue(this.getIndex.apply(this,arguments))},
+	//	getType:function(uri,localName){}
+	//	getType:function(i){},
+};
+
+function _set_proto_(thiz, parent) {
+	thiz.__proto__ = parent;
+	return thiz;
+}
+if (!(_set_proto_({}, _set_proto_.prototype) instanceof _set_proto_)) {
+	_set_proto_ = function _set_proto_(thiz, parent) {
+		function p() {};
+		p.prototype = parent;
+		p = new p();
+		for (parent in thiz) {
+			p[parent] = thiz[parent];
+		}
+		return p;
+	};
+}
+
+function split(source, start) {
+	var match;
+	var buf = [];
+	var reg = /'[^']+'|"[^"]+"|[^\s<>\/=]+=?|(\/?\s*>|<)/g;
+	reg.lastIndex = start;
+	reg.exec(source); //skip <
+	while (match = reg.exec(source)) {
+		buf.push(match);
+		if (match[1]) return buf;
+	}
+}
+
+exports.XMLReader = XMLReader;
+
+/***/ }),
+/* 32 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _typeof2 = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+var _typeof = typeof Symbol === "function" && _typeof2(Symbol.iterator) === "symbol" ? function (obj) {
+	return typeof obj === "undefined" ? "undefined" : _typeof2(obj);
+} : function (obj) {
+	return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj === "undefined" ? "undefined" : _typeof2(obj);
+};
+
+var _createClass = function () {
+	function defineProperties(target, props) {
+		for (var i = 0; i < props.length; i++) {
+			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
+		}
+	}return function (Constructor, protoProps, staticProps) {
+		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
+	};
+}();
+
+function _classCallCheck(instance, Constructor) {
+	if (!(instance instanceof Constructor)) {
+		throw new TypeError("Cannot call a class as a function");
+	}
+}
+
+var _require = __webpack_require__(0),
+    wordToUtf8 = _require.wordToUtf8,
+    convertSpaces = _require.convertSpaces,
+    defaults = _require.defaults;
+
+var createScope = __webpack_require__(33);
+var xmlMatcher = __webpack_require__(13);
+
+var _require2 = __webpack_require__(1),
+    throwMultiError = _require2.throwMultiError,
+    throwContentMustBeString = _require2.throwContentMustBeString;
+
+var Lexer = __webpack_require__(34);
+var Parser = __webpack_require__(35);
+
+var _require3 = __webpack_require__(36),
+    _render = _require3.render;
+
+function _getFullText(content, tagsXmlArray) {
+	var matcher = xmlMatcher(content, tagsXmlArray);
+	var result = matcher.matches.map(function (match) {
+		return match.array[2];
+	});
+	return wordToUtf8(convertSpaces(result.join("")));
+}
+
+module.exports = function () {
+	function XmlTemplater(content, options) {
+		_classCallCheck(this, XmlTemplater);
+
+		this.fromJson(options);
+		this.setModules({ inspect: { filePath: this.filePath } });
+		this.load(content);
+	}
+
+	_createClass(XmlTemplater, [{
+		key: "load",
+		value: function load(content) {
+			if (typeof content !== "string") {
+				throwContentMustBeString(typeof content === "undefined" ? "undefined" : _typeof(content));
+			}
+			this.content = content;
+		}
+	}, {
+		key: "setTags",
+		value: function setTags(tags) {
+			this.tags = tags != null ? tags : {};
+			this.scopeManager = createScope({ tags: this.tags, parser: this.parser });
+			return this;
+		}
+	}, {
+		key: "fromJson",
+		value: function fromJson(options) {
+			this.filePath = options.filePath;
+			this.modules = options.modules;
+			this.fileTypeConfig = options.fileTypeConfig;
+			Object.keys(defaults).map(function (key) {
+				this[key] = options[key] != null ? options[key] : defaults[key];
+			}, this);
+		}
+	}, {
+		key: "getFullText",
+		value: function getFullText() {
+			return _getFullText(this.content, this.fileTypeConfig.tagsXmlTextArray);
+		}
+	}, {
+		key: "setModules",
+		value: function setModules(obj) {
+			this.modules.forEach(function (module) {
+				module.set(obj);
+			});
+		}
+	}, {
+		key: "parse",
+		value: function parse() {
+			var allErrors = [];
+			this.xmllexed = Lexer.xmlparse(this.content, {
+				text: this.fileTypeConfig.tagsXmlTextArray,
+				other: this.fileTypeConfig.tagsXmlLexedArray
+			});
+			this.setModules({ inspect: { xmllexed: this.xmllexed } });
+
+			var _Lexer$parse = Lexer.parse(this.xmllexed, this.delimiters),
+			    lexed = _Lexer$parse.lexed,
+			    lexerErrors = _Lexer$parse.errors;
+
+			allErrors = allErrors.concat(lexerErrors);
+			this.lexed = lexed;
+			this.setModules({ inspect: { lexed: this.lexed } });
+			this.parsed = Parser.parse(this.lexed, this.modules);
+			this.setModules({ inspect: { parsed: this.parsed } });
+
+			var _Parser$postparse = Parser.postparse(this.parsed, this.modules),
+			    postparsed = _Parser$postparse.postparsed,
+			    postparsedErrors = _Parser$postparse.errors;
+
+			this.postparsed = postparsed;
+			this.setModules({ inspect: { postparsed: this.postparsed } });
+			allErrors = allErrors.concat(postparsedErrors);
+			this.errorChecker(allErrors);
+			return this;
+		}
+	}, {
+		key: "errorChecker",
+		value: function errorChecker(errors) {
+			var _this = this;
+
+			if (errors.length) {
+				this.modules.forEach(function (module) {
+					errors = module.errorsTransformer(errors);
+				});
+				errors.forEach(function (error) {
+					error.properties.file = _this.filePath;
+				});
+				throwMultiError(errors);
+			}
+		}
+		/*
+  content is the whole content to be tagged
+  scope is the current scope
+  returns the new content of the tagged content
+  */
+
+	}, {
+		key: "render",
+		value: function render(to) {
+			this.filePath = to;
+			var options = {
+				compiled: this.postparsed,
+				tags: this.tags,
+				modules: this.modules,
+				parser: this.parser,
+				nullGetter: this.nullGetter,
+				filePath: this.filePath,
+				render: _render
+			};
+			options.scopeManager = createScope(options);
+
+			var _render2 = _render(options),
+			    errors = _render2.errors,
+			    parts = _render2.parts;
+
+			this.errorChecker(errors);
+			this.content = parts.join("");
+			this.setModules({ inspect: { content: this.content } });
+			return this;
+		}
+	}]);
+
+	return XmlTemplater;
+}();
+
+/***/ }),
+/* 33 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _createClass = function () {
+	function defineProperties(target, props) {
+		for (var i = 0; i < props.length; i++) {
+			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
+		}
+	}return function (Constructor, protoProps, staticProps) {
+		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
+	};
+}();
+
+function _classCallCheck(instance, Constructor) {
+	if (!(instance instanceof Constructor)) {
+		throw new TypeError("Cannot call a class as a function");
+	}
+}
+
+var _require = __webpack_require__(1),
+    XTScopeParserError = _require.XTScopeParserError;
+
+// This class responsibility is to manage the scope
+
+
+var ScopeManager = function () {
+	function ScopeManager(options) {
+		_classCallCheck(this, ScopeManager);
+
+		this.scopePath = options.scopePath;
+		this.scopeList = options.scopeList;
+		this.parser = options.parser;
+	}
+
+	_createClass(ScopeManager, [{
+		key: "loopOver",
+		value: function loopOver(tag, callback, inverted) {
+			inverted = inverted || false;
+			return this.loopOverValue(this.getValue(tag), callback, inverted);
+		}
+	}, {
+		key: "functorIfInverted",
+		value: function functorIfInverted(inverted, functor, value) {
+			if (inverted) {
+				functor(value);
+			}
+		}
+	}, {
+		key: "isValueFalsy",
+		value: function isValueFalsy(value, type) {
+			return value == null || !value || type === "[object Array]" && value.length === 0;
+		}
+	}, {
+		key: "loopOverValue",
+		value: function loopOverValue(value, functor, inverted) {
+			var type = Object.prototype.toString.call(value);
+			var currentValue = this.scopeList[this.num];
+			if (this.isValueFalsy(value, type)) {
+				return this.functorIfInverted(inverted, functor, currentValue);
+			}
+			if (type === "[object Array]") {
+				for (var i = 0, scope; i < value.length; i++) {
+					scope = value[i];
+					this.functorIfInverted(!inverted, functor, scope);
+				}
+				return;
+			}
+			if (type === "[object Object]") {
+				return this.functorIfInverted(!inverted, functor, value);
+			}
+			return this.functorIfInverted(!inverted, functor, currentValue);
+		}
+	}, {
+		key: "getValue",
+		value: function getValue(tag, num) {
+			// search in the scopes (in reverse order) and keep the first defined value
+			this.num = num == null ? this.scopeList.length - 1 : num;
+			var err = void 0;
+			var result = void 0;
+			var scope = this.scopeList[this.num];
+			var parser = this.parser(tag, { scopePath: this.scopePath });
+			try {
+				result = parser.get(scope, { num: this.num, scopeList: this.scopeList });
+			} catch (error) {
+				err = new XTScopeParserError("Scope parser execution failed");
+				err.properties = {
+					id: "scopeparser_execution_failed",
+					explanation: "The scope parser for the tag " + tag + " failed to execute",
+					scope: scope,
+					tag: tag,
+					rootError: error
+				};
+				throw err;
+			}
+			if (result == null && this.num > 0) {
+				return this.getValue(tag, this.num - 1);
+			}
+			return result;
+		}
+	}, {
+		key: "createSubScopeManager",
+		value: function createSubScopeManager(scope, tag) {
+			return new ScopeManager({
+				parser: this.parser,
+				scopeList: this.scopeList.concat(scope),
+				scopePath: this.scopePath.concat(tag)
+			});
+		}
+	}]);
+
+	return ScopeManager;
+}();
+
+module.exports = function (options) {
+	options.scopePath = [];
+	options.scopeList = [options.tags];
+	return new ScopeManager(options);
+};
+
+/***/ }),
+/* 34 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _require = __webpack_require__(1),
+    getUnclosedTagException = _require.getUnclosedTagException,
+    getUnopenedTagException = _require.getUnopenedTagException,
+    throwMalformedXml = _require.throwMalformedXml;
+
+var _require2 = __webpack_require__(0),
+    concatArrays = _require2.concatArrays,
+    isTextStart = _require2.isTextStart,
+    isTextEnd = _require2.isTextEnd;
+
+function inRange(range, match) {
+	return range[0] <= match.offset && match.offset < range[1];
+}
+
+function updateInTextTag(part, inTextTag) {
+	if (isTextStart(part)) {
+		if (inTextTag) {
+			throwMalformedXml(part);
+		}
+		return true;
+	}
+	if (isTextEnd(part)) {
+		if (!inTextTag) {
+			throwMalformedXml(part);
+		}
+		return false;
+	}
+	return inTextTag;
+}
+
+function offsetSort(a, b) {
+	return a.offset - b.offset;
+}
+
+function getTag(tag) {
+	var position = "start";
+	var start = 1;
+	if (tag[tag.length - 2] === "/") {
+		position = "selfclosing";
+	}
+	if (tag[1] === "/") {
+		start = 2;
+		position = "end";
+	}
+	var index = tag.indexOf(" ");
+	var end = index === -1 ? tag.length - 1 : index;
+	return {
+		tag: tag.slice(start, end),
+		position: position
+	};
+}
+
+function tagMatcher(content, textMatchArray, othersMatchArray) {
+	var cursor = 0;
+	var contentLength = content.length;
+	var allMatches = concatArrays([textMatchArray.map(function (tag) {
+		return { tag: tag, text: true };
+	}), othersMatchArray.map(function (tag) {
+		return { tag: tag, text: false };
+	})]).reduce(function (allMatches, t) {
+		allMatches[t.tag] = t.text;
+		return allMatches;
+	}, {});
+	var totalMatches = [];
+
+	while (cursor < contentLength) {
+		cursor = content.indexOf("<", cursor);
+		if (cursor === -1) {
+			break;
+		}
+		var offset = cursor;
+		cursor = content.indexOf(">", cursor);
+		var tagText = content.slice(offset, cursor + 1);
+
+		var _getTag = getTag(tagText),
+		    tag = _getTag.tag,
+		    position = _getTag.position;
+
+		var text = allMatches[tag];
+		if (text == null) {
+			continue;
+		}
+		totalMatches.push({
+			type: "tag",
+			position: position,
+			text: text,
+			offset: offset,
+			value: tagText,
+			tag: tag
+		});
+	}
+
+	return totalMatches;
+}
+
+function getDelimiterErrors(delimiterMatches, fullText, ranges) {
+	if (delimiterMatches.length === 0) {
+		return [];
+	}
+	var errors = [];
+	var inDelimiter = false;
+	var lastDelimiterMatch = { offset: 0 };
+	var xtag = void 0;
+	var rangeIndex = 0;
+	delimiterMatches.forEach(function (delimiterMatch) {
+		while (ranges[rangeIndex + 1]) {
+			if (ranges[rangeIndex + 1].offset > delimiterMatch.offset) {
+				break;
+			}
+			rangeIndex++;
+		}
+		xtag = fullText.substr(lastDelimiterMatch.offset, delimiterMatch.offset - lastDelimiterMatch.offset);
+		if (delimiterMatch.position === "start" && inDelimiter || delimiterMatch.position === "end" && !inDelimiter) {
+			if (delimiterMatch.position === "start") {
+				errors.push(getUnclosedTagException({ xtag: xtag, offset: lastDelimiterMatch.offset }));
+				delimiterMatch.error = true;
+			} else {
+				errors.push(getUnopenedTagException({ xtag: xtag, offset: delimiterMatch.offset }));
+				delimiterMatch.error = true;
+			}
+		} else {
+			inDelimiter = !inDelimiter;
+		}
+		lastDelimiterMatch = delimiterMatch;
+	});
+	var delimiterMatch = { offset: fullText.length };
+	xtag = fullText.substr(lastDelimiterMatch.offset, delimiterMatch.offset - lastDelimiterMatch.offset);
+	if (inDelimiter) {
+		errors.push(getUnclosedTagException({ xtag: xtag, offset: lastDelimiterMatch.offset }));
+		delimiterMatch.error = true;
+	}
+	return errors;
+}
+
+function getAllIndexes(arr, val, position) {
+	var indexes = [];
+	var offset = -1;
+	do {
+		offset = arr.indexOf(val, offset + 1);
+		if (offset !== -1) {
+			indexes.push({ offset: offset, position: position });
+		}
+	} while (offset !== -1);
+	return indexes;
+}
+
+function Reader(innerContentParts) {
+	var _this = this;
+
+	this.innerContentParts = innerContentParts;
+	this.full = "";
+	this.parseDelimiters = function (delimiters) {
+		_this.full = _this.innerContentParts.map(function (p) {
+			return p.value;
+		}).join("");
+		var delimiterMatches = concatArrays([getAllIndexes(_this.full, delimiters.start, "start"), getAllIndexes(_this.full, delimiters.end, "end")]).sort(offsetSort);
+
+		var offset = 0;
+		var ranges = _this.innerContentParts.map(function (part) {
+			offset += part.value.length;
+			return { offset: offset - part.value.length, lIndex: part.lIndex };
+		});
+
+		var errors = getDelimiterErrors(delimiterMatches, _this.full, ranges);
+		var delimiterLength = {
+			start: delimiters.start.length,
+			end: delimiters.end.length
+		};
+		var cutNext = 0;
+		var delimiterIndex = 0;
+
+		_this.parsed = ranges.map(function (p, i) {
+			var offset = p.offset;
+
+			var range = [offset, offset + this.innerContentParts[i].value.length];
+			var partContent = this.innerContentParts[i].value;
+			var delimitersInOffset = [];
+			while (delimiterIndex < delimiterMatches.length && inRange(range, delimiterMatches[delimiterIndex])) {
+				delimitersInOffset.push(delimiterMatches[delimiterIndex]);
+				delimiterIndex++;
+			}
+			var parts = [];
+			var cursor = 0;
+			if (cutNext > 0) {
+				cursor = cutNext;
+				cutNext = 0;
+			}
+			delimitersInOffset.forEach(function (delimiterInOffset) {
+				var value = partContent.substr(cursor, delimiterInOffset.offset - offset - cursor);
+				if (value.length > 0) {
+					parts.push({ type: "content", value: value, offset: cursor + offset });
+					cursor += value.length;
+				}
+				var delimiterPart = {
+					type: "delimiter",
+					position: delimiterInOffset.position,
+					offset: cursor + offset
+				};
+				if (delimiterInOffset.error) {
+					delimiterPart.error = delimiterInOffset.error;
+				}
+				parts.push(delimiterPart);
+				cursor = delimiterInOffset.offset - offset + delimiterLength[delimiterInOffset.position];
+			});
+			cutNext = cursor - partContent.length;
+			var value = partContent.substr(cursor);
+			if (value.length > 0) {
+				parts.push({ type: "content", value: value, offset: offset });
+			}
+			return parts;
+		}, _this);
+		_this.errors = errors;
+	};
+}
+
+module.exports = {
+	parse: function parse(xmlparsed, delimiters) {
+		var inTextTag = false;
+		var innerContentParts = [];
+		xmlparsed.forEach(function (part) {
+			inTextTag = updateInTextTag(part, inTextTag);
+			if (inTextTag && part.type === "content") {
+				innerContentParts.push(part);
+			}
+		});
+		var reader = new Reader(innerContentParts);
+		reader.parseDelimiters(delimiters);
+
+		var lexed = [];
+		var index = 0;
+		xmlparsed.forEach(function (part) {
+			inTextTag = updateInTextTag(part, inTextTag);
+			if (part.type === "content") {
+				part.position = inTextTag ? "insidetag" : "outsidetag";
+			}
+			if (inTextTag && part.type === "content") {
+				Array.prototype.push.apply(lexed, reader.parsed[index].map(function (p) {
+					if (p.type === "content") {
+						p.position = "insidetag";
+					}
+					return p;
+				}));
+				index++;
+			} else {
+				lexed.push(part);
+			}
+		});
+		return { errors: reader.errors, lexed: lexed };
+	},
+	xmlparse: function xmlparse(content, xmltags) {
+		var matches = tagMatcher(content, xmltags.text, xmltags.other);
+		var cursor = 0;
+		var parsed = matches.reduce(function (parsed, match) {
+			var value = content.substr(cursor, match.offset - cursor);
+			if (value.length > 0) {
+				parsed.push({ type: "content", value: value });
+			}
+			cursor = match.offset + match.value.length;
+			delete match.offset;
+			if (match.value.length > 0) {
+				parsed.push(match);
+			}
+			return parsed;
+		}, []).map(function (p, i) {
+			p.lIndex = i;
+			return p;
+		});
+		var value = content.substr(cursor);
+		if (value.length > 0) {
+			parsed.push({ type: "content", value: value });
+		}
+		return parsed;
+	}
+};
+
+/***/ }),
+/* 35 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _extends = Object.assign || function (target) {
+	for (var i = 1; i < arguments.length; i++) {
+		var source = arguments[i];for (var key in source) {
+			if (Object.prototype.hasOwnProperty.call(source, key)) {
+				target[key] = source[key];
+			}
+		}
+	}return target;
+};
+
+var _require = __webpack_require__(0),
+    wordToUtf8 = _require.wordToUtf8,
+    concatArrays = _require.concatArrays;
+
+function moduleParse(modules, placeHolderContent, parsed, startOffset) {
+	var moduleParsed = void 0;
+	for (var i = 0, l = modules.length; i < l; i++) {
+		var _module = modules[i];
+		moduleParsed = _module.parse(placeHolderContent);
+		if (moduleParsed) {
+			moduleParsed.offset = startOffset;
+			parsed.push(moduleParsed);
+			return parsed;
+		}
+	}
+	parsed.push({
+		type: "placeholder",
+		value: placeHolderContent,
+		offset: startOffset
+	});
+	return parsed;
+}
+
+var parser = {
+	postparse: function postparse(postparsed, modules) {
+		function getTraits(traitName, postparsed) {
+			return modules.map(function (module) {
+				return module.getTraits(traitName, postparsed);
+			});
+		}
+		var errors = [];
+		function postparse(postparsed, options) {
+			return modules.reduce(function (postparsed, module) {
+				var r = module.postparse(postparsed, _extends({}, options, {
+					postparse: postparse,
+					getTraits: getTraits
+				}));
+				if (r.errors) {
+					errors = concatArrays([errors, r.errors]);
+					return r.postparsed;
+				}
+				return r;
+			}, postparsed);
+		}
+		return { postparsed: postparse(postparsed), errors: errors };
+	},
+	parse: function parse(lexed, modules) {
+		var inPlaceHolder = false;
+		var placeHolderContent = "";
+		var startOffset = void 0;
+		var tailParts = [];
+		return lexed.reduce(function lexedToParsed(parsed, token) {
+			if (token.type === "delimiter") {
+				inPlaceHolder = token.position === "start";
+				if (token.position === "end") {
+					placeHolderContent = wordToUtf8(placeHolderContent);
+					parsed = moduleParse(modules, placeHolderContent, parsed, startOffset);
+					startOffset = null;
+					Array.prototype.push.apply(parsed, tailParts);
+					tailParts = [];
+				}
+				if (token.position === "start") {
+					tailParts = [];
+					startOffset = token.offset;
+				}
+				placeHolderContent = "";
+				return parsed;
+			}
+			if (!inPlaceHolder) {
+				parsed.push(token);
+				return parsed;
+			}
+			if (token.type !== "content" || token.position !== "insidetag") {
+				tailParts.push(token);
+				return parsed;
+			}
+			placeHolderContent += token.value;
+			return parsed;
+		}, []);
+	}
+};
+
+module.exports = parser;
+
+/***/ }),
+/* 36 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _require = __webpack_require__(0),
+    utf8ToWord = _require.utf8ToWord,
+    concatArrays = _require.concatArrays,
+    hasCorruptCharacters = _require.hasCorruptCharacters;
+
+var _require2 = __webpack_require__(1),
+    throwUnimplementedTagType = _require2.throwUnimplementedTagType,
+    throwCorruptCharacters = _require2.throwCorruptCharacters;
+
+function moduleRender(part, options) {
+	var moduleRendered = void 0;
+	for (var i = 0, l = options.modules.length; i < l; i++) {
+		var _module = options.modules[i];
+		moduleRendered = _module.render(part, options);
+		if (moduleRendered) {
+			return moduleRendered;
+		}
+	}
+	return false;
+}
+
+function render(options) {
+	var compiled = options.compiled,
+	    scopeManager = options.scopeManager,
+	    nullGetter = options.nullGetter;
+
+	var errors = [];
+	var parts = compiled.map(function (part) {
+		var moduleRendered = moduleRender(part, options);
+		if (moduleRendered) {
+			if (moduleRendered.errors) {
+				errors = concatArrays([errors, moduleRendered.errors]);
+			}
+			return moduleRendered.value;
+		}
+		if (part.type === "placeholder") {
+			var value = scopeManager.getValue(part.value);
+			if (value == null) {
+				value = nullGetter(part);
+			}
+			if (hasCorruptCharacters(value)) {
+				throwCorruptCharacters({ tag: part.value, value: value });
+			}
+			return utf8ToWord(value);
+		}
+		if (part.type === "content" || part.type === "tag") {
+			return part.value;
+		}
+		throwUnimplementedTagType(part);
+	});
+	return { errors: errors, parts: parts };
+}
+
+module.exports = { render: render };
+
+/***/ }),
+/* 37 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var loopModule = __webpack_require__(38);
+var spacePreserveModule = __webpack_require__(39);
+var rawXmlModule = __webpack_require__(40);
+var expandPairTrait = __webpack_require__(41);
+var render = __webpack_require__(43);
+
+var PptXFileTypeConfig = {
+	getTemplatedFiles: function getTemplatedFiles(zip) {
+		var slideTemplates = zip.file(/ppt\/(slides|slideMasters)\/(slide|slideMaster)\d+\.xml/).map(function (file) {
+			return file.name;
+		});
+		return slideTemplates.concat(["ppt/presentation.xml", "docProps/app.xml", "docProps/core.xml"]);
+	},
+	textPath: function textPath() {
+		return "ppt/slides/slide1.xml";
+	},
+
+	tagsXmlTextArray: ["a:t", "m:t", "vt:lpstr", "dc:title", "dc:creator", "cp:keywords"],
+	tagsXmlLexedArray: ["p:sp", "a:tc", "a:tr", "a:table", "a:p", "a:r"],
+	expandTags: [{ contains: "a:tc", expand: "a:tr" }],
+	onParagraphLoop: [{ contains: "a:p", expand: "a:p", onlyTextInTag: true }],
+	tagRawXml: "p:sp",
+	tagTextXml: "a:t",
+	baseModules: [loopModule, expandPairTrait, rawXmlModule, render]
+};
+
+var DocXFileTypeConfig = {
+	getTemplatedFiles: function getTemplatedFiles(zip) {
+		var baseTags = ["docProps/core.xml", "docProps/app.xml", "word/document.xml", "word/document2.xml"];
+		var slideTemplates = zip.file(/word\/(header|footer)\d+\.xml/).map(function (file) {
+			return file.name;
+		});
+		return slideTemplates.concat(baseTags);
+	},
+	textPath: function textPath(zip) {
+		if (zip.files["word/document.xml"]) {
+			return "word/document.xml";
+		}
+		if (zip.files["word/document2.xml"]) {
+			return "word/document2.xml";
+		}
+	},
+
+	tagsXmlTextArray: ["w:t", "m:t", "vt:lpstr", "dc:title", "dc:creator", "cp:keywords"],
+	tagsXmlLexedArray: ["w:tc", "w:tr", "w:table", "w:p", "w:r", "w:rPr", "w:pPr", "w:spacing"],
+	expandTags: [{ contains: "w:tc", expand: "w:tr" }],
+	onParagraphLoop: [{ contains: "w:p", expand: "w:p", onlyTextInTag: true }],
+	tagRawXml: "w:p",
+	tagTextXml: "w:t",
+	baseModules: [loopModule, spacePreserveModule, expandPairTrait, rawXmlModule, render]
+};
+
+module.exports = {
+	docx: DocXFileTypeConfig,
+	pptx: PptXFileTypeConfig
+};
+
+/***/ }),
+/* 38 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _require = __webpack_require__(0),
+    mergeObjects = _require.mergeObjects,
+    chunkBy = _require.chunkBy,
+    last = _require.last,
+    isParagraphStart = _require.isParagraphStart,
+    isParagraphEnd = _require.isParagraphEnd,
+    isContent = _require.isContent;
+
+var dashInnerRegex = /^-([^\s]+)\s(.+)$/;
+var wrapper = __webpack_require__(4);
+
+var moduleName = "loop";
+
+function hasContent(parts) {
+	return parts.some(function (part) {
+		return isContent(part);
+	});
+}
+
+function isEnclosedByParagraphs(parsed) {
+	if (parsed.length === 0) {
+		return false;
+	}
+	return isParagraphStart(parsed[0]) && isParagraphEnd(last(parsed));
+}
+
+function getOffset(chunk) {
+	return hasContent(chunk) ? 0 : chunk.length;
+}
+
+var loopModule = {
+	name: "LoopModule",
+	prefix: {
+		start: "#",
+		end: "/",
+		dash: "-",
+		inverted: "^"
+	},
+	parse: function parse(placeHolderContent) {
+		var module = moduleName;
+		var type = "placeholder";
+		var prefix = this.prefix;
+		if (placeHolderContent[0] === prefix.start) {
+			return {
+				type: type,
+				value: placeHolderContent.substr(1),
+				expandTo: "auto",
+				module: module,
+				location: "start",
+				inverted: false
+			};
+		}
+		if (placeHolderContent[0] === prefix.inverted) {
+			return {
+				type: type,
+				value: placeHolderContent.substr(1),
+				expandTo: "auto",
+				module: module,
+				location: "start",
+				inverted: true
+			};
+		}
+		if (placeHolderContent[0] === prefix.end) {
+			return {
+				type: type,
+				value: placeHolderContent.substr(1),
+				module: module,
+				location: "end"
+			};
+		}
+		if (placeHolderContent[0] === prefix.dash) {
+			var value = placeHolderContent.replace(dashInnerRegex, "$2");
+			var expandTo = placeHolderContent.replace(dashInnerRegex, "$1");
+			return {
+				type: type,
+				value: value,
+				expandTo: expandTo,
+				module: module,
+				location: "start",
+				inverted: false
+			};
+		}
+		return null;
+	},
+	getTraits: function getTraits(traitName, parsed) {
+		if (traitName !== "expandPair") {
+			return;
+		}
+
+		return parsed.reduce(function (tags, part, offset) {
+			if (part.type === "placeholder" && part.module === moduleName) {
+				tags.push({ part: part, offset: offset });
+			}
+			return tags;
+		}, []);
+	},
+	postparse: function postparse(parsed, _ref) {
+		var basePart = _ref.basePart;
+
+		if (!isEnclosedByParagraphs(parsed)) {
+			return parsed;
+		}
+		if (!basePart || basePart.expandTo !== "auto") {
+			return parsed;
+		}
+		var chunks = chunkBy(parsed, function (p) {
+			if (isParagraphStart(p)) {
+				return "start";
+			}
+			if (isParagraphEnd(p)) {
+				return "end";
+			}
+			return null;
+		});
+		if (chunks.length <= 2) {
+			return parsed;
+		}
+		var firstChunk = chunks[0];
+		var lastChunk = last(chunks);
+		var firstOffset = getOffset(firstChunk);
+		var lastOffset = getOffset(lastChunk);
+		if (firstOffset === 0 || lastOffset === 0) {
+			return parsed;
+		}
+		var result = parsed.slice(firstOffset, parsed.length - lastOffset);
+		return result;
+	},
+	render: function render(part, options) {
+		if (!part.type === "placeholder" || part.module !== moduleName) {
+			return null;
+		}
+		var totalValue = [];
+		var errors = [];
+		function loopOver(scope) {
+			var scopeManager = options.scopeManager.createSubScopeManager(scope, part.value);
+			var subRendered = options.render(mergeObjects({}, options, {
+				compiled: part.subparsed,
+				tags: {},
+				scopeManager: scopeManager
+			}));
+			totalValue = totalValue.concat(subRendered.parts);
+			errors = errors.concat(subRendered.errors || []);
+		}
+		options.scopeManager.loopOver(part.value, loopOver, part.inverted);
+		return { value: totalValue.join(""), errors: errors };
+	}
+};
+
+module.exports = function () {
+	return wrapper(loopModule);
+};
+
+/***/ }),
+/* 39 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var wrapper = __webpack_require__(4);
+
+var _require = __webpack_require__(0),
+    isTextStart = _require.isTextStart,
+    isTextEnd = _require.isTextEnd;
+
+var spacePreserve = {
+	name: "SpacePreserveModule",
+	postparse: function postparse(postparsed) {
+		var chunk = [];
+		var inChunk = false;
+		var result = postparsed.reduce(function (postparsed, part) {
+			if (isTextStart(part) && part.tag === "w:t") {
+				inChunk = true;
+			}
+			if (inChunk) {
+				if (part.type === "placeholder" && !part.module) {
+					chunk[0].value = '<w:t xml:space="preserve">';
+				}
+				chunk.push(part);
+			} else {
+				postparsed.push(part);
+			}
+			if (isTextEnd(part) && part.tag === "w:t") {
+				Array.prototype.push.apply(postparsed, chunk);
+				inChunk = false;
+				chunk = [];
+			}
+			return postparsed;
+		}, []);
+		Array.prototype.push.apply(result, chunk);
+		return result;
+	}
+};
+module.exports = function () {
+	return wrapper(spacePreserve);
+};
+
+/***/ }),
+/* 40 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _createClass = function () {
+	function defineProperties(target, props) {
+		for (var i = 0; i < props.length; i++) {
+			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
+		}
+	}return function (Constructor, protoProps, staticProps) {
+		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
+	};
+}();
+
+function _classCallCheck(instance, Constructor) {
+	if (!(instance instanceof Constructor)) {
+		throw new TypeError("Cannot call a class as a function");
+	}
+}
+
+var traits = __webpack_require__(6);
+
+var _require = __webpack_require__(0),
+    isContent = _require.isContent;
+
+var _require2 = __webpack_require__(1),
+    throwRawTagShouldBeOnlyTextInParagraph = _require2.throwRawTagShouldBeOnlyTextInParagraph;
+
+var moduleName = "rawxml";
+var wrapper = __webpack_require__(4);
+
+function getInner(_ref) {
+	var part = _ref.part,
+	    left = _ref.left,
+	    right = _ref.right,
+	    postparsed = _ref.postparsed,
+	    index = _ref.index;
+
+	var paragraphParts = postparsed.slice(left + 1, right);
+	paragraphParts.forEach(function (p, i) {
+		if (i === index - left - 1) {
+			return;
+		}
+		if (isContent(p)) {
+			throwRawTagShouldBeOnlyTextInParagraph({ paragraphParts: paragraphParts, part: part });
+		}
+	});
+	return part;
+}
+
+var RawXmlModule = function () {
+	function RawXmlModule() {
+		_classCallCheck(this, RawXmlModule);
+
+		this.name = "RawXmlModule";
+		this.prefix = "@";
+	}
+
+	_createClass(RawXmlModule, [{
+		key: "optionsTransformer",
+		value: function optionsTransformer(options, docxtemplater) {
+			this.fileTypeConfig = docxtemplater.fileTypeConfig;
+			return options;
+		}
+	}, {
+		key: "parse",
+		value: function parse(placeHolderContent) {
+			var type = "placeholder";
+			if (placeHolderContent[0] !== this.prefix) {
+				return null;
+			}
+			return { type: type, value: placeHolderContent.substr(1), module: moduleName };
+		}
+	}, {
+		key: "postparse",
+		value: function postparse(postparsed) {
+			return traits.expandToOne(postparsed, { moduleName: moduleName, getInner: getInner, expandTo: this.fileTypeConfig.tagRawXml });
+		}
+	}, {
+		key: "render",
+		value: function render(part, options) {
+			if (part.module !== moduleName) {
+				return null;
+			}
+			var value = options.scopeManager.getValue(part.value);
+			if (value == null) {
+				value = options.nullGetter(part);
+			}
+			return { value: value };
+		}
+	}]);
+
+	return RawXmlModule;
+}();
+
+module.exports = function () {
+	return wrapper(new RawXmlModule());
+};
+
+/***/ }),
+/* 41 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _slicedToArray = function () {
+	function sliceIterator(arr, i) {
+		var _arr = [];var _n = true;var _d = false;var _e = undefined;try {
+			for (var _i = arr[Symbol.iterator](), _s; !(_n = (_s = _i.next()).done); _n = true) {
+				_arr.push(_s.value);if (i && _arr.length === i) break;
+			}
+		} catch (err) {
+			_d = true;_e = err;
+		} finally {
+			try {
+				if (!_n && _i["return"]) _i["return"]();
+			} finally {
+				if (_d) throw _e;
+			}
+		}return _arr;
+	}return function (arr, i) {
+		if (Array.isArray(arr)) {
+			return arr;
+		} else if (Symbol.iterator in Object(arr)) {
+			return sliceIterator(arr, i);
+		} else {
+			throw new TypeError("Invalid attempt to destructure non-iterable instance");
+		}
+	};
+}();
+
+var traitName = "expandPair";
+var mergeSort = __webpack_require__(42);
+
+var _require = __webpack_require__(0),
+    getLeft = _require.getLeft,
+    getRight = _require.getRight;
+
+var wrapper = __webpack_require__(4);
+
+var _require2 = __webpack_require__(6),
+    getExpandToDefault = _require2.getExpandToDefault;
+
+var _require3 = __webpack_require__(1),
+    getUnmatchedLoopException = _require3.getUnmatchedLoopException,
+    getClosingTagNotMatchOpeningTag = _require3.getClosingTagNotMatchOpeningTag,
+    throwLocationInvalid = _require3.throwLocationInvalid;
+
+function getOpenCountChange(part) {
+	switch (part.location) {
+		case "start":
+			return 1;
+		case "end":
+			return -1;
+		default:
+			throwLocationInvalid(part);
+	}
+}
+
+function getPairs(traits) {
+	var errors = [];
+	var pairs = [];
+	if (traits.length === 0) {
+		return { pairs: pairs, errors: errors };
+	}
+	var countOpen = 1;
+
+	var _traits = _slicedToArray(traits, 1),
+	    firstTrait = _traits[0];
+
+	if (firstTrait.part.location === "start") {
+		for (var i = 1; i < traits.length; i++) {
+			var currentTrait = traits[i];
+			countOpen += getOpenCountChange(currentTrait.part);
+			if (countOpen === 0) {
+				var _outer = getPairs(traits.slice(i + 1));
+				if (currentTrait.part.value !== firstTrait.part.value && currentTrait.part.value !== "") {
+					errors.push(getClosingTagNotMatchOpeningTag({ tags: [firstTrait.part, currentTrait.part] }));
+				} else {
+					pairs = [[firstTrait, currentTrait]];
+				}
+				return { pairs: pairs.concat(_outer.pairs), errors: errors.concat(_outer.errors) };
+			}
+		}
+	}
+	var part = firstTrait.part;
+
+	errors.push(getUnmatchedLoopException({ part: part, location: part.location }));
+	var outer = getPairs(traits.slice(1));
+	return { pairs: outer.pairs, errors: errors.concat(outer.errors) };
+}
+
+var expandPairTrait = {
+	name: "ExpandPairTrait",
+	optionsTransformer: function optionsTransformer(options, docxtemplater) {
+		this.expandTags = docxtemplater.fileTypeConfig.expandTags.concat(docxtemplater.options.paragraphLoop ? docxtemplater.fileTypeConfig.onParagraphLoop : []);
+		return options;
+	},
+	postparse: function postparse(postparsed, _ref) {
+		var _this = this;
+
+		var getTraits = _ref.getTraits,
+		    _postparse = _ref.postparse;
+
+		var traits = getTraits(traitName, postparsed);
+		traits = traits.map(function (trait) {
+			return trait || [];
+		});
+		traits = mergeSort(traits);
+
+		var _getPairs = getPairs(traits),
+		    pairs = _getPairs.pairs,
+		    errors = _getPairs.errors;
+
+		var expandedPairs = pairs.map(function (pair) {
+			var expandTo = pair[0].part.expandTo;
+
+			if (expandTo === "auto") {
+				var result = getExpandToDefault(postparsed, pair, _this.expandTags);
+				if (result.error) {
+					errors.push(result.error);
+				}
+				expandTo = result.value;
+			}
+			if (!expandTo) {
+				return [pair[0].offset, pair[1].offset];
+			}
+			var left = getLeft(postparsed, expandTo, pair[0].offset);
+			var right = getRight(postparsed, expandTo, pair[1].offset);
+			return [left, right];
+		});
+
+		var currentPairIndex = 0;
+		var innerParts = void 0;
+		var newParsed = postparsed.reduce(function (newParsed, part, i) {
+			var inPair = currentPairIndex < pairs.length && expandedPairs[currentPairIndex][0] <= i;
+			var pair = pairs[currentPairIndex];
+			var expandedPair = expandedPairs[currentPairIndex];
+			if (!inPair) {
+				newParsed.push(part);
+				return newParsed;
+			}
+			if (expandedPair[0] === i) {
+				innerParts = [];
+			}
+			if (pair[0].offset !== i && pair[1].offset !== i) {
+				innerParts.push(part);
+			}
+			if (expandedPair[1] === i) {
+				var basePart = postparsed[pair[0].offset];
+				basePart.subparsed = _postparse(innerParts, { basePart: basePart });
+				delete basePart.location;
+				delete basePart.expandTo;
+				newParsed.push(basePart);
+				currentPairIndex++;
+			}
+			return newParsed;
+		}, []);
+		return { postparsed: newParsed, errors: errors };
+	}
+};
+
+module.exports = function () {
+	return wrapper(expandPairTrait);
+};
+
+/***/ }),
+/* 42 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+function getMinFromArrays(arrays, state) {
+	var minIndex = -1;
+	for (var i = 0, l = arrays.length; i < l; i++) {
+		if (state[i] >= arrays[i].length) {
+			continue;
+		}
+		if (minIndex === -1 || arrays[i][state[i]].offset < arrays[minIndex][state[minIndex]].offset) {
+			minIndex = i;
+		}
+	}
+	if (minIndex === -1) {
+		throw new Error("minIndex negative");
+	}
+	return minIndex;
+}
+
+module.exports = function (arrays) {
+	var totalLength = arrays.reduce(function (sum, array) {
+		return sum + array.length;
+	}, 0);
+	arrays = arrays.filter(function (array) {
+		return array.length > 0;
+	});
+
+	var resultArray = new Array(totalLength);
+
+	var state = arrays.map(function () {
+		return 0;
+	});
+
+	var i = 0;
+
+	while (i <= totalLength - 1) {
+		var arrayIndex = getMinFromArrays(arrays, state);
+		resultArray[i] = arrays[arrayIndex][state[arrayIndex]];
+		state[arrayIndex]++;
+		i++;
+	}
+
+	return resultArray;
+};
+
+/***/ }),
+/* 43 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+
+
+var _createClass = function () {
+	function defineProperties(target, props) {
+		for (var i = 0; i < props.length; i++) {
+			var descriptor = props[i];descriptor.enumerable = descriptor.enumerable || false;descriptor.configurable = true;if ("value" in descriptor) descriptor.writable = true;Object.defineProperty(target, descriptor.key, descriptor);
+		}
+	}return function (Constructor, protoProps, staticProps) {
+		if (protoProps) defineProperties(Constructor.prototype, protoProps);if (staticProps) defineProperties(Constructor, staticProps);return Constructor;
+	};
+}();
+
+function _classCallCheck(instance, Constructor) {
+	if (!(instance instanceof Constructor)) {
+		throw new TypeError("Cannot call a class as a function");
+	}
+}
+
+var wrapper = __webpack_require__(4);
+
+var _require = __webpack_require__(1),
+    getScopeCompilationError = _require.getScopeCompilationError;
+
+var Render = function () {
+	function Render() {
+		_classCallCheck(this, Render);
+
+		this.name = "Render";
+	}
+
+	_createClass(Render, [{
+		key: "set",
+		value: function set(obj) {
+			if (obj.compiled) {
+				this.compiled = obj.compiled;
+			}
+			if (obj.data != null) {
+				this.data = obj.data;
+			}
+		}
+	}, {
+		key: "getRenderedMap",
+		value: function getRenderedMap(mapper) {
+			var _this = this;
+
+			return Object.keys(this.compiled).reduce(function (mapper, from) {
+				mapper[from] = { from: from, data: _this.data };
+				return mapper;
+			}, mapper);
+		}
+	}, {
+		key: "optionsTransformer",
+		value: function optionsTransformer(options, docxtemplater) {
+			this.parser = docxtemplater.parser;
+			return options;
+		}
+	}, {
+		key: "postparse",
+		value: function postparse(postparsed) {
+			var _this2 = this;
+
+			var errors = [];
+			postparsed.forEach(function (p) {
+				if (p.type === "placeholder") {
+					var tag = p.value;
+					try {
+						_this2.parser(tag);
+					} catch (rootError) {
+						errors.push(getScopeCompilationError({ tag: tag, rootError: rootError }));
+					}
+				}
+			});
+			return { postparsed: postparsed, errors: errors };
+		}
+	}]);
+
+	return Render;
+}();
+
+module.exports = function () {
+	return wrapper(new Render());
+};
+
+/***/ }),
 /* 44 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
 
 
-var base64 = __webpack_require__(25);
+var base64 = __webpack_require__(7);
 
 /**
 Usage:
@@ -9181,10 +9203,10 @@ function JSZip(data, options) {
         return newObj;
     };
 }
-JSZip.prototype = __webpack_require__(26);
+JSZip.prototype = __webpack_require__(8);
 JSZip.prototype.load = __webpack_require__(62);
-JSZip.support = __webpack_require__(24);
-JSZip.defaults = __webpack_require__(37);
+JSZip.support = __webpack_require__(5);
+JSZip.defaults = __webpack_require__(21);
 
 /**
  * @deprecated
@@ -9208,7 +9230,7 @@ JSZip.base64 = {
         return base64.decode(input);
     }
 };
-JSZip.compressions = __webpack_require__(27);
+JSZip.compressions = __webpack_require__(9);
 module.exports = JSZip;
 
 /***/ }),
@@ -9497,11 +9519,11 @@ exports.uncompress = function (input) {
 // Top level file is just a mixin of submodules & constants
 
 
-var assign = __webpack_require__(23).assign;
+var assign = __webpack_require__(3).assign;
 
 var deflate = __webpack_require__(51);
 var inflate = __webpack_require__(54);
-var constants = __webpack_require__(35);
+var constants = __webpack_require__(19);
 
 var pako = {};
 
@@ -9517,10 +9539,10 @@ module.exports = pako;
 
 
 var zlib_deflate = __webpack_require__(52);
-var utils = __webpack_require__(23);
-var strings = __webpack_require__(33);
-var msg = __webpack_require__(28);
-var ZStream = __webpack_require__(34);
+var utils = __webpack_require__(3);
+var strings = __webpack_require__(17);
+var msg = __webpack_require__(10);
+var ZStream = __webpack_require__(18);
 
 var toString = Object.prototype.toString;
 
@@ -9927,11 +9949,11 @@ exports.gzip = gzip;
 //   misrepresented as being the original software.
 // 3. This notice may not be removed or altered from any source distribution.
 
-var utils = __webpack_require__(23);
+var utils = __webpack_require__(3);
 var trees = __webpack_require__(53);
-var adler32 = __webpack_require__(31);
-var crc32 = __webpack_require__(32);
-var msg = __webpack_require__(28);
+var adler32 = __webpack_require__(15);
+var crc32 = __webpack_require__(16);
+var msg = __webpack_require__(10);
 
 /* Public constants ==========================================================*/
 /* ===========================================================================*/
@@ -11757,7 +11779,7 @@ exports.deflateTune = deflateTune;
 //   misrepresented as being the original software.
 // 3. This notice may not be removed or altered from any source distribution.
 
-var utils = __webpack_require__(23);
+var utils = __webpack_require__(3);
 
 /* Public constants ==========================================================*/
 /* ===========================================================================*/
@@ -12941,11 +12963,11 @@ exports._tr_align = _tr_align;
 
 
 var zlib_inflate = __webpack_require__(55);
-var utils = __webpack_require__(23);
-var strings = __webpack_require__(33);
-var c = __webpack_require__(35);
-var msg = __webpack_require__(28);
-var ZStream = __webpack_require__(34);
+var utils = __webpack_require__(3);
+var strings = __webpack_require__(17);
+var c = __webpack_require__(19);
+var msg = __webpack_require__(10);
+var ZStream = __webpack_require__(18);
 var GZheader = __webpack_require__(58);
 
 var toString = Object.prototype.toString;
@@ -13376,9 +13398,9 @@ exports.ungzip = inflate;
 //   misrepresented as being the original software.
 // 3. This notice may not be removed or altered from any source distribution.
 
-var utils = __webpack_require__(23);
-var adler32 = __webpack_require__(31);
-var crc32 = __webpack_require__(32);
+var utils = __webpack_require__(3);
+var adler32 = __webpack_require__(15);
+var crc32 = __webpack_require__(16);
 var inflate_fast = __webpack_require__(56);
 var inflate_table = __webpack_require__(57);
 
@@ -15380,7 +15402,7 @@ module.exports = function inflate_fast(strm, start) {
 //   misrepresented as being the original software.
 // 3. This notice may not be removed or altered from any source distribution.
 
-var utils = __webpack_require__(23);
+var utils = __webpack_require__(3);
 
 var MAXBITS = 15;
 var ENOUGH_LENS = 852;
@@ -15760,7 +15782,7 @@ module.exports = GZheader;
 "use strict";
 
 
-var utils = __webpack_require__(22);
+var utils = __webpack_require__(2);
 
 var table = [0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F, 0xE963A535, 0x9E6495A3, 0x0EDB8832, 0x79DCB8A4, 0xE0D5E91E, 0x97D2D988, 0x09B64C2B, 0x7EB17CBD, 0xE7B82D07, 0x90BF1D91, 0x1DB71064, 0x6AB020F2, 0xF3B97148, 0x84BE41DE, 0x1ADAD47D, 0x6DDDE4EB, 0xF4D4B551, 0x83D385C7, 0x136C9856, 0x646BA8C0, 0xFD62F97A, 0x8A65C9EC, 0x14015C4F, 0x63066CD9, 0xFA0F3D63, 0x8D080DF5, 0x3B6E20C8, 0x4C69105E, 0xD56041E4, 0xA2677172, 0x3C03E4D1, 0x4B04D447, 0xD20D85FD, 0xA50AB56B, 0x35B5A8FA, 0x42B2986C, 0xDBBBC9D6, 0xACBCF940, 0x32D86CE3, 0x45DF5C75, 0xDCD60DCF, 0xABD13D59, 0x26D930AC, 0x51DE003A, 0xC8D75180, 0xBFD06116, 0x21B4F4B5, 0x56B3C423, 0xCFBA9599, 0xB8BDA50F, 0x2802B89E, 0x5F058808, 0xC60CD9B2, 0xB10BE924, 0x2F6F7C87, 0x58684C11, 0xC1611DAB, 0xB6662D3D, 0x76DC4190, 0x01DB7106, 0x98D220BC, 0xEFD5102A, 0x71B18589, 0x06B6B51F, 0x9FBFE4A5, 0xE8B8D433, 0x7807C9A2, 0x0F00F934, 0x9609A88E, 0xE10E9818, 0x7F6A0DBB, 0x086D3D2D, 0x91646C97, 0xE6635C01, 0x6B6B51F4, 0x1C6C6162, 0x856530D8, 0xF262004E, 0x6C0695ED, 0x1B01A57B, 0x8208F4C1, 0xF50FC457, 0x65B0D9C6, 0x12B7E950, 0x8BBEB8EA, 0xFCB9887C, 0x62DD1DDF, 0x15DA2D49, 0x8CD37CF3, 0xFBD44C65, 0x4DB26158, 0x3AB551CE, 0xA3BC0074, 0xD4BB30E2, 0x4ADFA541, 0x3DD895D7, 0xA4D1C46D, 0xD3D6F4FB, 0x4369E96A, 0x346ED9FC, 0xAD678846, 0xDA60B8D0, 0x44042D73, 0x33031DE5, 0xAA0A4C5F, 0xDD0D7CC9, 0x5005713C, 0x270241AA, 0xBE0B1010, 0xC90C2086, 0x5768B525, 0x206F85B3, 0xB966D409, 0xCE61E49F, 0x5EDEF90E, 0x29D9C998, 0xB0D09822, 0xC7D7A8B4, 0x59B33D17, 0x2EB40D81, 0xB7BD5C3B, 0xC0BA6CAD, 0xEDB88320, 0x9ABFB3B6, 0x03B6E20C, 0x74B1D29A, 0xEAD54739, 0x9DD277AF, 0x04DB2615, 0x73DC1683, 0xE3630B12, 0x94643B84, 0x0D6D6A3E, 0x7A6A5AA8, 0xE40ECF0B, 0x9309FF9D, 0x0A00AE27, 0x7D079EB1, 0xF00F9344, 0x8708A3D2, 0x1E01F268, 0x6906C2FE, 0xF762575D, 0x806567CB, 0x196C3671, 0x6E6B06E7, 0xFED41B76, 0x89D32BE0, 0x10DA7A5A, 0x67DD4ACC, 0xF9B9DF6F, 0x8EBEEFF9, 0x17B7BE43, 0x60B08ED5, 0xD6D6A3E8, 0xA1D1937E, 0x38D8C2C4, 0x4FDFF252, 0xD1BB67F1, 0xA6BC5767, 0x3FB506DD, 0x48B2364B, 0xD80D2BDA, 0xAF0A1B4C, 0x36034AF6, 0x41047A60, 0xDF60EFC3, 0xA867DF55, 0x316E8EEF, 0x4669BE79, 0xCB61B38C, 0xBC66831A, 0x256FD2A0, 0x5268E236, 0xCC0C7795, 0xBB0B4703, 0x220216B9, 0x5505262F, 0xC5BA3BBE, 0xB2BD0B28, 0x2BB45A92, 0x5CB36A04, 0xC2D7FFA7, 0xB5D0CF31, 0x2CD99E8B, 0x5BDEAE1D, 0x9B64C2B0, 0xEC63F226, 0x756AA39C, 0x026D930A, 0x9C0906A9, 0xEB0E363F, 0x72076785, 0x05005713, 0x95BF4A82, 0xE2B87A14, 0x7BB12BAE, 0x0CB61B38, 0x92D28E9B, 0xE5D5BE0D, 0x7CDCEFB7, 0x0BDBDF21, 0x86D3D2D4, 0xF1D4E242, 0x68DDB3F8, 0x1FDA836E, 0x81BE16CD, 0xF6B9265B, 0x6FB077E1, 0x18B74777, 0x88085AE6, 0xFF0F6A70, 0x66063BCA, 0x11010B5C, 0x8F659EFF, 0xF862AE69, 0x616BFFD3, 0x166CCF45, 0xA00AE278, 0xD70DD2EE, 0x4E048354, 0x3903B3C2, 0xA7672661, 0xD06016F7, 0x4969474D, 0x3E6E77DB, 0xAED16A4A, 0xD9D65ADC, 0x40DF0B66, 0x37D83BF0, 0xA9BCAE53, 0xDEBB9EC5, 0x47B2CF7F, 0x30B5FFE9, 0xBDBDF21C, 0xCABAC28A, 0x53B39330, 0x24B4A3A6, 0xBAD03605, 0xCDD70693, 0x54DE5729, 0x23D967BF, 0xB3667A2E, 0xC4614AB8, 0x5D681B02, 0x2A6F2B94, 0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D];
 
@@ -15803,7 +15825,7 @@ module.exports = function crc32(input, crc) {
 "use strict";
 
 
-var utils = __webpack_require__(22);
+var utils = __webpack_require__(2);
 
 /**
  * An object to write any content to a string.
@@ -15839,7 +15861,7 @@ module.exports = StringWriter;
 "use strict";
 
 
-var utils = __webpack_require__(22);
+var utils = __webpack_require__(2);
 
 /**
  * An object to write any content to an Uint8Array.
@@ -15881,9 +15903,9 @@ module.exports = Uint8ArrayWriter;
 "use strict";
 
 
-var base64 = __webpack_require__(25);
-var utf8 = __webpack_require__(39);
-var utils = __webpack_require__(22);
+var base64 = __webpack_require__(7);
+var utf8 = __webpack_require__(23);
+var utils = __webpack_require__(2);
 var ZipEntries = __webpack_require__(63);
 module.exports = function (data, options) {
     var files, zipEntries, i, input;
@@ -15927,15 +15949,15 @@ module.exports = function (data, options) {
 "use strict";
 
 
-var StringReader = __webpack_require__(40);
+var StringReader = __webpack_require__(24);
 var NodeBufferReader = __webpack_require__(64);
-var Uint8ArrayReader = __webpack_require__(42);
-var ArrayReader = __webpack_require__(43);
-var utils = __webpack_require__(22);
-var sig = __webpack_require__(36);
+var Uint8ArrayReader = __webpack_require__(26);
+var ArrayReader = __webpack_require__(27);
+var utils = __webpack_require__(2);
+var sig = __webpack_require__(20);
 var ZipEntry = __webpack_require__(65);
-var support = __webpack_require__(24);
-var jszipProto = __webpack_require__(26);
+var support = __webpack_require__(5);
+var jszipProto = __webpack_require__(8);
 //  class ZipEntries {{{
 /**
  * All the entries in the zip file.
@@ -16210,7 +16232,7 @@ module.exports = ZipEntries;
 "use strict";
 
 
-var Uint8ArrayReader = __webpack_require__(42);
+var Uint8ArrayReader = __webpack_require__(26);
 
 function NodeBufferReader(data) {
     this.data = data;
@@ -16238,11 +16260,11 @@ module.exports = NodeBufferReader;
 "use strict";
 
 
-var StringReader = __webpack_require__(40);
-var utils = __webpack_require__(22);
-var CompressedObject = __webpack_require__(38);
-var jszipProto = __webpack_require__(26);
-var support = __webpack_require__(24);
+var StringReader = __webpack_require__(24);
+var utils = __webpack_require__(2);
+var CompressedObject = __webpack_require__(22);
+var jszipProto = __webpack_require__(8);
+var support = __webpack_require__(5);
 
 var MADE_BY_DOS = 0x00;
 var MADE_BY_UNIX = 0x03;
@@ -16565,7 +16587,7 @@ module.exports = ZipEntry;
 "use strict";
 
 
-var utils = __webpack_require__(22);
+var utils = __webpack_require__(2);
 
 /**
  * @deprecated
@@ -16667,6 +16689,213 @@ exports.findCompression = function (compressionMethod) {
 exports.isRegExp = function (object) {
   return utils.isRegExp(object);
 };
+
+/***/ }),
+/* 67 */
+/***/ (function(module, exports, __webpack_require__) {
+
+"use strict";
+var __WEBPACK_AMD_DEFINE_RESULT__;
+
+/* FileSaver.js
+ * A saveAs() FileSaver implementation.
+ * 1.3.2
+ * 2016-06-16 18:25:19
+ *
+ * By Eli Grey, http://eligrey.com
+ * License: MIT
+ *   See https://github.com/eligrey/FileSaver.js/blob/master/LICENSE.md
+ */
+
+/*global self */
+/*jslint bitwise: true, indent: 4, laxbreak: true, laxcomma: true, smarttabs: true, plusplus: true */
+
+/*! @source http://purl.eligrey.com/github/FileSaver.js/blob/master/FileSaver.js */
+
+var saveAs = saveAs || function (view) {
+	"use strict";
+	// IE <10 is explicitly unsupported
+
+	if (typeof view === "undefined" || typeof navigator !== "undefined" && /MSIE [1-9]\./.test(navigator.userAgent)) {
+		return;
+	}
+	var doc = view.document
+	// only get URL when necessary in case Blob.js hasn't overridden it yet
+	,
+	    get_URL = function get_URL() {
+		return view.URL || view.webkitURL || view;
+	},
+	    save_link = doc.createElementNS("http://www.w3.org/1999/xhtml", "a"),
+	    can_use_save_link = "download" in save_link,
+	    click = function click(node) {
+		var event = new MouseEvent("click");
+		node.dispatchEvent(event);
+	},
+	    is_safari = /constructor/i.test(view.HTMLElement) || view.safari,
+	    is_chrome_ios = /CriOS\/[\d]+/.test(navigator.userAgent),
+	    throw_outside = function throw_outside(ex) {
+		(view.setImmediate || view.setTimeout)(function () {
+			throw ex;
+		}, 0);
+	},
+	    force_saveable_type = "application/octet-stream"
+	// the Blob API is fundamentally broken as there is no "downloadfinished" event to subscribe to
+	,
+	    arbitrary_revoke_timeout = 1000 * 40 // in ms
+	,
+	    revoke = function revoke(file) {
+		var revoker = function revoker() {
+			if (typeof file === "string") {
+				// file is an object URL
+				get_URL().revokeObjectURL(file);
+			} else {
+				// file is a File
+				file.remove();
+			}
+		};
+		setTimeout(revoker, arbitrary_revoke_timeout);
+	},
+	    dispatch = function dispatch(filesaver, event_types, event) {
+		event_types = [].concat(event_types);
+		var i = event_types.length;
+		while (i--) {
+			var listener = filesaver["on" + event_types[i]];
+			if (typeof listener === "function") {
+				try {
+					listener.call(filesaver, event || filesaver);
+				} catch (ex) {
+					throw_outside(ex);
+				}
+			}
+		}
+	},
+	    auto_bom = function auto_bom(blob) {
+		// prepend BOM for UTF-8 XML and text/* types (including HTML)
+		// note: your browser will automatically convert UTF-16 U+FEFF to EF BB BF
+		if (/^\s*(?:text\/\S*|application\/xml|\S*\/\S*\+xml)\s*;.*charset\s*=\s*utf-8/i.test(blob.type)) {
+			return new Blob([String.fromCharCode(0xFEFF), blob], { type: blob.type });
+		}
+		return blob;
+	},
+	    FileSaver = function FileSaver(blob, name, no_auto_bom) {
+		if (!no_auto_bom) {
+			blob = auto_bom(blob);
+		}
+		// First try a.download, then web filesystem, then object URLs
+		var filesaver = this,
+		    type = blob.type,
+		    force = type === force_saveable_type,
+		    object_url,
+		    dispatch_all = function dispatch_all() {
+			dispatch(filesaver, "writestart progress write writeend".split(" "));
+		}
+		// on any filesys errors revert to saving with object URLs
+		,
+		    fs_error = function fs_error() {
+			if ((is_chrome_ios || force && is_safari) && view.FileReader) {
+				// Safari doesn't allow downloading of blob urls
+				var reader = new FileReader();
+				reader.onloadend = function () {
+					var url = is_chrome_ios ? reader.result : reader.result.replace(/^data:[^;]*;/, 'data:attachment/file;');
+					var popup = view.open(url, '_blank');
+					if (!popup) view.location.href = url;
+					url = undefined; // release reference before dispatching
+					filesaver.readyState = filesaver.DONE;
+					dispatch_all();
+				};
+				reader.readAsDataURL(blob);
+				filesaver.readyState = filesaver.INIT;
+				return;
+			}
+			// don't create more object URLs than needed
+			if (!object_url) {
+				object_url = get_URL().createObjectURL(blob);
+			}
+			if (force) {
+				view.location.href = object_url;
+			} else {
+				var opened = view.open(object_url, "_blank");
+				if (!opened) {
+					// Apple does not allow window.open, see https://developer.apple.com/library/safari/documentation/Tools/Conceptual/SafariExtensionGuide/WorkingwithWindowsandTabs/WorkingwithWindowsandTabs.html
+					view.location.href = object_url;
+				}
+			}
+			filesaver.readyState = filesaver.DONE;
+			dispatch_all();
+			revoke(object_url);
+		};
+		filesaver.readyState = filesaver.INIT;
+
+		if (can_use_save_link) {
+			object_url = get_URL().createObjectURL(blob);
+			setTimeout(function () {
+				save_link.href = object_url;
+				save_link.download = name;
+				click(save_link);
+				dispatch_all();
+				revoke(object_url);
+				filesaver.readyState = filesaver.DONE;
+			});
+			return;
+		}
+
+		fs_error();
+	},
+	    FS_proto = FileSaver.prototype,
+	    saveAs = function saveAs(blob, name, no_auto_bom) {
+		return new FileSaver(blob, name || blob.name || "download", no_auto_bom);
+	};
+	// IE 10+ (native saveAs)
+	if (typeof navigator !== "undefined" && navigator.msSaveOrOpenBlob) {
+		return function (blob, name, no_auto_bom) {
+			name = name || blob.name || "download";
+
+			if (!no_auto_bom) {
+				blob = auto_bom(blob);
+			}
+			return navigator.msSaveOrOpenBlob(blob, name);
+		};
+	}
+
+	FS_proto.abort = function () {};
+	FS_proto.readyState = FS_proto.INIT = 0;
+	FS_proto.WRITING = 1;
+	FS_proto.DONE = 2;
+
+	FS_proto.error = FS_proto.onwritestart = FS_proto.onprogress = FS_proto.onwrite = FS_proto.onabort = FS_proto.onerror = FS_proto.onwriteend = null;
+
+	return saveAs;
+}(typeof self !== "undefined" && self || typeof window !== "undefined" && window || undefined.content);
+// `self` is undefined in Firefox for Android content script context
+// while `this` is nsIContentFrameMessageManager
+// with an attribute `content` that corresponds to the window
+
+if (typeof module !== "undefined" && module.exports) {
+	module.exports.saveAs = saveAs;
+} else if ("function" !== "undefined" && __webpack_require__(68) !== null && __webpack_require__(69) !== null) {
+	!(__WEBPACK_AMD_DEFINE_RESULT__ = (function () {
+		return saveAs;
+	}).call(exports, __webpack_require__, exports, module),
+				__WEBPACK_AMD_DEFINE_RESULT__ !== undefined && (module.exports = __WEBPACK_AMD_DEFINE_RESULT__));
+}
+
+/***/ }),
+/* 68 */
+/***/ (function(module, exports) {
+
+module.exports = function() {
+	throw new Error("define cannot be used indirect");
+};
+
+
+/***/ }),
+/* 69 */
+/***/ (function(module, exports) {
+
+/* WEBPACK VAR INJECTION */(function(__webpack_amd_options__) {/* globals __webpack_amd_options__ */
+module.exports = __webpack_amd_options__;
+
+/* WEBPACK VAR INJECTION */}.call(exports, {}))
 
 /***/ })
 /******/ ]);
