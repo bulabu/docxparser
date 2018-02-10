@@ -5,6 +5,7 @@ import FileSaver from "file-saver"
 var state = {templateData:{}};
 var questionSpan = document.getElementById('questions');
 var zip;
+var templateFile;
 
 function createQuestionHtml(question, index) {
 	var questionHtml = `
@@ -59,6 +60,7 @@ function handleCreateClick(evt) {
 }
 document.getElementById('createDocument').addEventListener('click', handleCreateClick, false);
 function readQuestionsFromDoc(file) {
+	templateFile = file;
 	zip = new JSZip(file);
 	var data = zip.files["word/document.xml"]._data.getContent();
 	var string = new TextDecoder("utf-8").decode(data);
@@ -80,7 +82,8 @@ function readQuestionsFromDoc(file) {
 
 function processDocument(zip){
 	var doc = new Docxtemplater();
-	doc.loadZip(zip).setOptions({paragraphLoop:true})
+	doc.loadZip(new JSZip(templateFile)).setOptions({paragraphLoop:true})
+	console.log(state.templateData);
 	doc.setData(state.templateData);
 	try {
 		// render the document (replace all occurences of {first_name} by John, {last_name} by Doe, ...)
@@ -101,6 +104,6 @@ function processDocument(zip){
             type:"blob",
             mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }) //Output the document using Data-URI
-	FileSaver.saveAs(out,"output.docx")
+	FileSaver.saveAs(out,"output"+Date.now()+".docx")
 
 }

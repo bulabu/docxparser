@@ -6459,6 +6459,7 @@ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { de
 var state = { templateData: {} };
 var questionSpan = document.getElementById('questions');
 var zip;
+var templateFile;
 
 function createQuestionHtml(question, index) {
 	var questionHtml = "\n\t" + question.question + ": \n\t\t<input type=\"radio\" class=\"answer\" id=\"choice1\"\n\t\t name=\"question" + index + "\" value=\"" + question.yesAnswer + "\">\n\t\t<label for=\"choice1\">" + question.yesAnswer + "</label>\n\n\t\t<input type=\"radio\" class=\"answer\" id=\"choice2\"\n\t\t name=\"question" + index + "\" value=\"" + question.noAnswer + "\">\n\t\t<label for=\"choice2\">" + question.noAnswer + "</label>\n\t\t<br>";
@@ -6505,6 +6506,7 @@ function handleCreateClick(evt) {
 }
 document.getElementById('createDocument').addEventListener('click', handleCreateClick, false);
 function readQuestionsFromDoc(file) {
+	templateFile = file;
 	zip = new _jszip2.default(file);
 	var data = zip.files["word/document.xml"]._data.getContent();
 	var string = new TextDecoder("utf-8").decode(data);
@@ -6526,7 +6528,8 @@ function readQuestionsFromDoc(file) {
 
 function processDocument(zip) {
 	var doc = new _docxtemplater2.default();
-	doc.loadZip(zip).setOptions({ paragraphLoop: true });
+	doc.loadZip(new _jszip2.default(templateFile)).setOptions({ paragraphLoop: true });
+	console.log(state.templateData);
 	doc.setData(state.templateData);
 	try {
 		// render the document (replace all occurences of {first_name} by John, {last_name} by Doe, ...)
@@ -6546,7 +6549,7 @@ function processDocument(zip) {
 		type: "blob",
 		mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	}); //Output the document using Data-URI
-	_fileSaver2.default.saveAs(out, "output.docx");
+	_fileSaver2.default.saveAs(out, "output" + Date.now() + ".docx");
 }
 
 /***/ }),
